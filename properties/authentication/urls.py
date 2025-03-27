@@ -28,11 +28,11 @@ urlpatterns = [
     ),
     path("forgot-password", ForgotPasswordView.as_view(), name="forgot_password"),
     path(
-        "reset-password-confirm/",
+        "reset-password/",
         PasswordResetConfirmView.as_view(),
         name="confirm_password",
     ),
-    path("reset-password", PasswordResetView.as_view(), name="reset_password"),
+    path("reset-password-confirm", PasswordResetView.as_view(), name="reset_password"),
     path("users/<int:id>", UserDetailsView.as_view(), name="user_detail"),
     path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
