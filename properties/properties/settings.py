@@ -31,7 +31,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", None)
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -49,10 +49,14 @@ THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
+    "corsheaders",
+    "parler",
+
 ]
 
 LOCAL_APPS = [
     "authentication",
+    "property"
 ]
 
 AUTH_USER_MODEL = "authentication.User"
@@ -77,6 +81,8 @@ SIMPLE_JWT = {
 }
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -86,7 +92,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "turi_check.urls"
+ROOT_URLCONF = "properties.urls"
 
 TEMPLATES = [
     {
@@ -104,7 +110,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "turi_check.wsgi.application"
+WSGI_APPLICATION = "properties.wsgi.application"
 
 
 # Database
@@ -174,3 +180,13 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 FRONTEND_URL = "http://127.0.0.1:8000/api/auth"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+CORS_ALLOW_METHODS = ["*"]

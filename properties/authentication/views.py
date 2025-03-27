@@ -8,7 +8,7 @@ from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from .serializers import (
     RegisterSerializer,
@@ -19,14 +19,14 @@ from .serializers import (
     PasswordResetConfirmSerializer,
 )
 from utils.email_services import Email
-from utils.translation_services import TranslateService
+from utils.translate_services import TranslateService
+from .models import User
 
-User = get_user_model()
 
 translator = TranslateService()
 
 
-def handle_response(data, status):
+def handle_response(data, status, request=None):
 
     def is_email(value):
         return isinstance(value, str) and re.match(r"^[^@]+@[^@]+\.[^@]+$", value)
@@ -38,18 +38,26 @@ def handle_response(data, status):
             isinstance(value, str) and not is_email(value) and key not in excluded_keys
         )
 
-    def translate_value(key, value):
-        return translator.translate(value) if should_translate(key, value) else value
+    def translate_value(key, value, target_language):
+        return (
+            translator.translate(value, target_language)
+            if should_translate(key, value)
+            else value
+        )
 
-    def process_data(data):
+    def process_data(data, target_language):
         """Recursively process for translate dictionaries and lists"""
         if isinstance(data, dict):
-            return {key: translate_value(key, value) for key, value in data.items()}
+            return {
+                key: translate_value(key, value, target_language)
+                for key, value in data.items()
+            }
         elif isinstance(data, list):
-            return [process_data(item) for item in data]
+            return [process_data(item, target_language) for item in data]
         return data
 
-    translated_data = process_data(data)
+    target_language = request.data.get("language", "es") if request else "es"
+    translated_data = process_data(data, target_language)
 
     return Response(translated_data, status=status)
 
@@ -92,12 +100,17 @@ class RegistrationView(generics.CreateAPIView):
 
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
+    permission_classes = [AllowAny]
+
+    def get_serializer_context(self):
+        """Pass the request object to the serializer."""
+        return {"request": self.request}
 
 
 class LoginView(APIView):
     """
-        Handle User Login and authentication using email/password and 
-        return access token and refresh token after success.
+    Handle User Login and authentication using email/password and
+    return access token and refresh token after success.
     """
 
     def post(self, request):
@@ -185,19 +198,21 @@ class ForgotPasswordView(APIView):
         """Sends password reset email using the custom Email class."""
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
-        reset_link = (
-            f"{settings.FRONTEND_URL}/reset-password-confirm/?uid={uid}&token={token}"
-        )
+        reset_link = f"{settings.FRONTEND_URL}/reset-password/?uid={uid}&token={token}"
+        if not user.has_translation("en"):
+            user.create_translation("en", first_name="User")
+            user.save()
+        first_name = getattr(user, "first_name", "User")
 
         email_body = f"""
-        <p>Hello {user.first_name},</p>
+        <p>Hello {first_name},</p>
         <p>Click the link below to reset your password:</p>
         <a href="{reset_link}">{reset_link}</a>
         <p>If you didn’t request this, please ignore this email.</p>
         """
 
         email = Email(subject="Password Reset Request")
-        email.to(user.email, name=user.first_name).add_html(email_body).send()
+        email.to(user.email, name=first_name).add_html(email_body).send()
 
 
 class PasswordResetConfirmView(APIView):
@@ -218,8 +233,8 @@ class PasswordResetConfirmView(APIView):
 
 class PasswordResetView(APIView):
     """
-        Handle Password change/Reset using and old password and 
-        verified old password before set new password.
+    Handle Password change/Reset using and old password and
+    verified old password before set new password.
     """
 
     permission_classes = [IsAuthenticated]
@@ -249,22 +264,26 @@ class UserDetailsView(APIView):
             if request.user.is_superadmin():
                 pass
             elif request.user.role == User.ADMIN:
-                if user.role in [User.ADMIN, User.SUPERADMIN]:
+                if user.role not in [User.ADMIN, User.SUPERADMIN]:
                     return handle_response(
                         {"error": "You do not have permission to view this user."},
                         status.HTTP_403_FORBIDDEN,
+                        request,
                     )
 
             elif request.user.id != user.id:
                 return handle_response(
                     {"error": "You do not have permission to view this user."},
                     status.HTTP_403_FORBIDDEN,
+                    request,
                 )
-            serializer = UserSerializer(user)
-            return handle_response(serializer.data, status.HTTP_200_OK)
+            serializer = UserSerializer(user, context={"request": request})
+            return handle_response(serializer.data, status.HTTP_200_OK, request)
         except User.DoesNotExist:
             return handle_response(
-                {"error": f"User not found for {id}"}, status.HTTP_404_NOT_FOUND
+                {"error": f"User not found for {id}"},
+                status.HTTP_404_NOT_FOUND,
+                request,
             )
 
     def put(self, request, id):
@@ -275,20 +294,26 @@ class UserDetailsView(APIView):
                     return handle_response(
                         {"error": "Only SuperAdmin can change roles."},
                         status.HTTP_403_FORBIDDEN,
+                        request,
                     )
             if request.user.id != user.id and not request.user.is_superadmin():
                 return handle_response(
                     {"error": "You do not have permission to update this user."},
                     status.HTTP_403_FORBIDDEN,
+                    request,
                 )
             serializer = UserSerializer(user, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
-                return handle_response(serializer.data, status.HTTP_200_OK)
-            return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+                return handle_response(serializer.data, status.HTTP_200_OK, request)
+            return handle_response(
+                serializer.errors, status.HTTP_400_BAD_REQUEST, request
+            )
         except User.DoesNotExist:
             return handle_response(
-                {"error": f"User not found for {id}"}, status.HTTP_404_NOT_FOUND
+                {"error": f"User not found for {id}"},
+                status.HTTP_404_NOT_FOUND,
+                request,
             )
 
     def delete(self, request, id):
@@ -301,6 +326,7 @@ class UserDetailsView(APIView):
                     return handle_response(
                         {"error": "SuperAdmin cannot delete another SuperAdmin."},
                         status.HTTP_403_FORBIDDEN,
+                        request,
                     )
                 pass
             elif request.user.role == User.ADMIN:
@@ -308,18 +334,22 @@ class UserDetailsView(APIView):
                     return handle_response(
                         {"error": "Admins cannot delete other Admins or SuperAdmins."},
                         status.HTTP_403_FORBIDDEN,
+                        request,
                     )
                 pass
             else:
                 return handle_response(
                     {"error": "You do not have permission to delete this user."},
                     status.HTTP_403_FORBIDDEN,
+                    request,
                 )
             user.delete()
             return handle_response(
-                {"message": "User deleted successfully!"}, status.HTTP_200_OK
+               {"message": "User deleted successfully!"}, status.HTTP_200_OK, request
             )
         except User.DoesNotExist:
             return handle_response(
-                {"error": f"User not found for {id}."}, status.HTTP_404_NOT_FOUND
+                {"error": f"User not found for {id}."},
+                status.HTTP_404_NOT_FOUND,
+                request,
             )

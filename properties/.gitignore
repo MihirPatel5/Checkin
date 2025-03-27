@@ -1,2 +1,7 @@
 .env
+authentication/__pycache__
+authentication/migrations/__pycache__
 properties/__pycache__
+utils/__pycache__
+property/migrations/__pycache__
+property/__pycache__
