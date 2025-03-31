@@ -1,10 +1,19 @@
 from django.db import models
 from django.core.exceptions import ValidationError
+from rest_framework import permissions
 from parler.models import TranslatableModel, TranslatedFields
 import requests
 
 
 class Property(TranslatableModel):
+    PROPERTY_TYPES = [
+        ("apartment", "Apartment"),
+        ("house", "House"),
+        ("villa", "Villa"),
+        ("hotel", "Hotel"),
+        ("hostel", "Hostel"),
+    ]
+
     translations = TranslatedFields(
         name=models.CharField(max_length=255, verbose_name="property_name"),
         description=models.TextField(verbose_name="Description"),
@@ -12,13 +21,7 @@ class Property(TranslatableModel):
         amenities=models.TextField(verbose_name="Amenities"),
         property_type=models.CharField(
             max_length=100,
-            choices=[
-                ("apartment", "Apartamento"),
-                ("house", "Casa"),
-                ("villa", "Villa"),
-                ("hotel", "Hotel"),
-                ("hostel", "Hostal"),
-            ],
+            choices=PROPERTY_TYPES,
             verbose_name="Property_type",
         ),
     )
@@ -36,7 +39,6 @@ class Property(TranslatableModel):
     webservice_password = models.CharField(max_length=255, null=True, blank=True, verbose_name="SES Password")
     establishment_code = models.CharField(max_length=50, null=True, blank=True, verbose_name="Establishment Code")
     landlord_code = models.CharField(max_length=50, null=True, blank=True, verbose_name="Landlord Code")
-
     ses_status = models.BooleanField(default=False, verbose_name="SES Connection Status")
 
     def __str__(self):
@@ -46,16 +48,22 @@ class Property(TranslatableModel):
         """
         Validates the SES.Hospedajes credentials via their API.
         """
-
-        if not all([self.webservice_username, self.webservice_password, self.establishment_code, self.landlord_code]):
+        if not all(
+            [
+                self.webservice_username,
+                self.webservice_password,
+                self.establishment_code,
+                self.landlord_code,
+            ]
+        ):
             raise ValidationError("All SES.Hospedajes credentials must be provided.")
-        
+
         api_url = "https://ses.hospedajes.gov/api/validate"
         payload = {
             "username": self.webservice_username,
             "password": self.webservice_password,
             "establishment_code": self.establishment_code,
-            "landlord_code":self.landlord_code,
+            "landlord_code": self.landlord_code,
         }
         try:
             response = requests.post(api_url, json=payload)
@@ -67,9 +75,30 @@ class Property(TranslatableModel):
                 raise ValidationError("SES Credentials validation failed")
         except requests.RequestException:
             raise ValidationError("Error connecting to SES.Hospedajes API.")
-        
+
         def save(self, *args, **kwargs):
             """Override save method to validate SES credentials when updated"""
             if self.webservice_username and self.wewebservice_password:
                 self.validate_ses_credentials()
-            super().save(*args, **kwargs)    
+            super().save(*args, **kwargs)
+
+
+class PropertyImage(models.Model):
+    property = models.ForeignKey(
+        Property, on_delete=models.CASCADE, related_name="images"
+    )
+    image = models.ImageField(upload_to="property_images/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Image for {self.property.safe_translation_getter('name', default='Unnamed Property')}"
+
+
+class IsLandlordOrAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.role in ["SuperAdmin", "Landlord", "Admin"]
+
+
+class IsSuperAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.role == "SuperAdmin"
