@@ -9,7 +9,7 @@ from .serializers import PropertySerializer
 
 
 class PropertyAPIView(APIView):
-    permission_class = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, pk=None):
         language = request.GET.get("language", request.LANGUAGE_CODE)
@@ -24,7 +24,7 @@ class PropertyAPIView(APIView):
                     property_instance, context={"request": request}
                 )
                 return Response(serializer.data, status=status.HTTP_200_OK)
-            except Property.DoseNotExist:
+            except Property.DoesNotExist:
                 return Response(
                     {"error": "Property not found"}, status=status.HTTP_404_NOT_FOUND
                 )
@@ -39,28 +39,26 @@ class PropertyAPIView(APIView):
             return Response(
                 {"error": "Permission Denied"}, status=status.HTTP_403_FORBIDDEN
             )
-        serializer = PropertySerializer(data=request.data)
-        if serializer.is_valid():
-            property_instance = serializer.save(owner=request)
-            try:
-                property_instance.validate_ses_credentials()
-                property_instance.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            except ValidationError as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer = PropertySerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            property_instance = serializer.save(owner=request.user)
+            property_instance.validate_ses_credentials()
+            property_instance.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except ValidationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def put(self, request, pk):
         try:
-            property_instance = Property.object.get(pk=pk)
-        except Exception as e:
+            property_instance = Property.objects.get(pk=pk)
+        except Property.DoesNotExist:
             return Response(
                 {"error": "Property not Found"}, status=status.HTTP_404_NOT_FOUND
             )
-        if request.user != property_instance.owner and request.user.role in [
-            "Admin",
-            "SuperAdmin",
-        ]:
+        if (request.user != property_instance.owner and 
+            request.user.role not in ["Admin", "SuperAdmin"]):
             return Response(
                 {"error": "Permission Denied"}, status=status.HTTP_403_FORBIDDEN
             )
@@ -85,10 +83,8 @@ class PropertyAPIView(APIView):
             return Response(
                 {"error": "Property not found"}, status=status.HTTP_404_NOT_FOUND
             )
-        if request.user != property_instance.owner and request.user.role not in [
-            "Admin",
-            "SuperAdmin",
-        ]:
+        if (request.user != property_instance.owner and 
+            request.user.role not in ["Admin", "SuperAdmin"]):
             return Response(
                 {"error": "Permission Denied"}, status=status.HTTP_403_FORBIDDEN
             )
@@ -108,7 +104,12 @@ class ValidateSESCredentialsAPIView(APIView):
             property_instance.validate_ses_credentials()
             property_instance.save()
             return Response(
-                {"message": "SES Credentials are valid."}, status, status.HTTP_200_OK
+                {"message": "SES Credentials are valid."}, 
+                status=status.HTTP_200_OK
             )
         except ValidationError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Property.DoesNotExist:
+            return Response(
+                {"error": "Property not found"}, status=status.HTTP_404_NOT_FOUND
+            )
