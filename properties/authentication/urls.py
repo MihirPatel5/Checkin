@@ -14,6 +14,7 @@ from .views import (
     PasswordResetView,
     ForgotPasswordView,
     UserDetailsView,
+    AdminRegisterUserView,
 )
 
 
@@ -33,6 +34,8 @@ urlpatterns = [
         name="confirm_password",
     ),
     path("reset-password-confirm", PasswordResetView.as_view(), name="reset_password"),
+    path("users/", UserDetailsView.as_view(), name="user_list"),
+    path("user/add", AdminRegisterUserView.as_view(), name="add_user"),
     path("users/<int:id>", UserDetailsView.as_view(), name="user_detail"),
     path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),

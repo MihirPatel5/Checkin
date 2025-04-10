@@ -15,10 +15,13 @@ class TranslateService:
     ):
         self.api_key = settings.OPENAI_API_KEY
 
-    def translate(self, text: str, target_language: str = "es") -> str:
+    def translate(self, text: str, target_language: str = None) -> str:
         """
         Translates the given text into the target language.
         """
+        if not target_language:
+            target_language = "es"
+        print(f"Translating to: {target_language}")
         if not text:
             return ""
 
@@ -41,13 +44,34 @@ class TranslateService:
             return text
 
 
-@contextmanager
-def switch_language(instance, language_code):
-    """Context manager to switch language for a translatable model instance."""
-    current_language = translation.get_language()
-    try:
-        translation.activate(language_code)
-        instance.set_current_language(language_code)
-        yield instance
-    finally:
-        translation.activate(current_language)
+
+openai.api_key = settings.OPENAI_API_KEY
+
+TARGET_LANGUAGES = ['fr', 'es', 'de', 'it', 'pt', 'en']
+
+def translate_text(text, target_lang):
+    print('target_lang: ', target_lang)
+    prompt = f"Translate the following to {target_lang}:\n\n{text}"
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+    print('response[): ', response['choices'][0]['message']['content'].strip())
+    return response['choices'][0]['message']['content'].strip()
+
+def generate_translations(source_data: dict, source_lang: str) -> dict:
+    translations = {source_lang: source_data}
+
+    for lang in TARGET_LANGUAGES:
+        if lang == source_lang:
+            continue
+        lang_fields = {}
+        for key, value in source_data.items():
+            try:
+                lang_fields[key] = translate_text(value, lang)
+            except Exception as e:
+                print(f"Translation error for {key} to {lang}: {e}")
+                lang_fields[key] = value  # fallback
+        translations[lang] = lang_fields
+    return translations

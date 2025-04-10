@@ -20,7 +20,12 @@ class UserManager(BaseUserManager):
         first_name = extra_fields.pop("first_name", "")
         last_name = extra_fields.pop("last_name", "")
         language = extra_fields.pop("language", "en")
-        user = self.model(email=email, phone_number=phone_number, role=role, username=username, **extra_fields)
+        user = self.model(
+            email=email,
+            role=role,
+            username=username,
+            **extra_fields
+        )
         user.set_password(password)
         user.save(using=self._db)
 
