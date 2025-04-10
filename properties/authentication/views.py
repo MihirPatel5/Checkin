@@ -17,9 +17,10 @@ from .serializers import (
     PasswordResetSerializer,
     ForgotPasswordSerializer,
     PasswordResetConfirmSerializer,
+    AdminRegisterUserSerializer,
 )
 from utils.email_services import Email
-from utils.translate_services import TranslateService
+from utils.translation_services import TranslateService
 from .models import User
 
 
@@ -73,25 +74,25 @@ class VerifyEmailView(APIView):
             if user.is_active:
                 return handle_response(
                     {"message": "Email already verified"},
-                    status.HTTP_400_BAD_REQUEST,
+                    status.HTTP_400_BAD_REQUEST, request
                 )
 
             if default_token_generator.check_token(user, token):
                 user.is_active = True
                 user.save()
-                return handle_response(
+                return Response(
                     {"message": "Email verified successfully"},
-                    status.HTTP_200_OK,
+                    status.HTTP_200_OK
                 )
 
             return handle_response(
                 {"error": "Invalid or expired token"},
-                status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST, request
             )
 
         except (User.DoesNotExist, ValueError, TypeError):
             return handle_response(
-                {"error": "Invalid request"}, status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid request"}, status.HTTP_400_BAD_REQUEST, request
             )
 
 
@@ -123,15 +124,21 @@ class LoginView(APIView):
             if not user:
                 return handle_response(
                     {"error": "Invalid Credentials"},
-                    status.HTTP_401_UNAUTHORIZED,
+                    status=status.HTTP_400_BAD_REQUEST
                 )
 
             if not user.is_active:
                 return handle_response(
+                    {"error": "Your account is not activated. Please verify your email."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            user_language = request.data.get("language", "en")
+            if not user.has_translation(user_language):
+                return Response(
                     {
-                        "error": "Your account is not activated. Please verify your email."
+                        "error": "User does not have a translation for the current language."
                     },
-                    status.HTTP_403_FORBIDDEN,
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             refresh = RefreshToken.for_user(user)
@@ -139,7 +146,7 @@ class LoginView(APIView):
                 {
                     "refresh": str(refresh),
                     "access": str(refresh.access_token),
-                    "user": UserSerializer(user).data,
+                    "user": UserSerializer(user, context={"request": request}).data,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -162,19 +169,19 @@ class LogoutView(APIView):
             if not refresh_token:
                 return handle_response(
                     {"error": "Refresh token is required"},
-                    status.HTTP_400_BAD_REQUEST,
+                    status.HTTP_400_BAD_REQUEST, request
                 )
 
             token = RefreshToken(refresh_token)
             token.blacklist()
             return handle_response(
-                {"message": "Logout successful"}, status.HTTP_205_RESET_CONTENT
+                {"message": "Logout successful"}, status.HTTP_205_RESET_CONTENT, request
             )
 
         except Exception as e:
             return handle_response(
                 {"error": "Invalid or expired token"},
-                status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST, request
             )
 
 
@@ -190,9 +197,9 @@ class ForgotPasswordView(APIView):
             self.send_reset_email(user)
             return handle_response(
                 {"message": "Password reset link sent to your email."},
-                status.HTTP_200_OK,
+                status.HTTP_200_OK, request
             )
-        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST, request)
 
     def send_reset_email(self, user):
         """Sends password reset email using the custom Email class."""
@@ -225,10 +232,10 @@ class PasswordResetConfirmView(APIView):
             user.set_password(serializer.validated_data["new_password"])
             user.save()
             return handle_response(
-                {"message": "Password reset successful."}, status.HTTP_200_OK
+                {"message": "Password reset successful."}, status.HTTP_200_OK, request
             )
 
-        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST, request)
 
 
 class PasswordResetView(APIView):
@@ -251,37 +258,59 @@ class PasswordResetView(APIView):
                 {"message": "Password updated successfully."}, status=status.HTTP_200_OK
             )
 
-        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+        return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST, request)
 
 
 class UserDetailsView(APIView):
     permission_classes = [IsAuthenticated]
     """Handle retrive, updating and deletion of User by ID"""
 
-    def get(self, request, id):
+    def get(self, request, id=None):
         try:
-            user = User.objects.get(id=id)
-            if request.user.is_superadmin():
-                pass
-            elif request.user.role == User.ADMIN:
-                if user.role not in [User.ADMIN, User.SUPERADMIN]:
+            if id:
+                user = User.objects.get(id=id)
+                if request.user.is_superadmin():
+                    pass
+                elif request.user.role == User.ADMIN:
+                    if user.role not in [User.ADMIN, User.SUPERADMIN]:
+                        return handle_response(
+                            {"error": "You do not have permission to view this user."},
+                            status.HTTP_403_FORBIDDEN,
+                            request,
+                        )
+                elif request.user.id != user.id:
                     return handle_response(
                         {"error": "You do not have permission to view this user."},
                         status.HTTP_403_FORBIDDEN,
                         request,
                     )
-
-            elif request.user.id != user.id:
-                return handle_response(
-                    {"error": "You do not have permission to view this user."},
-                    status.HTTP_403_FORBIDDEN,
-                    request,
-                )
-            serializer = UserSerializer(user, context={"request": request})
-            return handle_response(serializer.data, status.HTTP_200_OK, request)
+                language = request.query_params.get("language", "en")
+                user.set_current_language(language)
+                serializer = UserSerializer(user, context={"request": request, "language": language})
+                return Response(serializer.data, status=status.HTTP_200_OK)
+ 
+            else:
+                if request.user.is_superadmin():
+                    pass
+                elif request.user.role == User.ADMIN:
+                    if user.role not in [User.ADMIN, User.SUPERADMIN]:
+                        return handle_response(
+                            {"error": "You do not have permission to view this user."},
+                            status.HTTP_403_FORBIDDEN,
+                            request,
+                        )
+                # elif request.user.id != user.id:
+                #     return handle_response(
+                #         {"error": "You do not have permission to view this user."},
+                #         status.HTTP_403_FORBIDDEN,
+                #         request,
+                #     )
+                users = User.objects.all()
+                serializer = UserSerializer(users, many=True, context={"request": request})
+                return Response(serializer.data, status=status.HTTP_200_OK)
         except User.DoesNotExist:
             return handle_response(
-                {"error": f"User not found for {id}"},
+                {"error": f"User not found for ID {id}"},
                 status.HTTP_404_NOT_FOUND,
                 request,
             )
@@ -305,7 +334,8 @@ class UserDetailsView(APIView):
             serializer = UserSerializer(user, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
-                return handle_response(serializer.data, status.HTTP_200_OK, request)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+                # return handle_response(serializer.data, status.HTTP_200_OK, request)
             return handle_response(
                 serializer.errors, status.HTTP_400_BAD_REQUEST, request
             )
@@ -345,7 +375,7 @@ class UserDetailsView(APIView):
                 )
             user.delete()
             return handle_response(
-               {"message": "User deleted successfully!"}, status.HTTP_200_OK, request
+                {"message": "User deleted successfully!"}, status.HTTP_200_OK, request
             )
         except User.DoesNotExist:
             return handle_response(
@@ -353,3 +383,11 @@ class UserDetailsView(APIView):
                 status.HTTP_404_NOT_FOUND,
                 request,
             )
+
+
+class AdminRegisterUserView(generics.CreateAPIView):
+    serializer_class = AdminRegisterUserSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
