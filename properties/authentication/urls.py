@@ -6,6 +6,7 @@ from rest_framework_simplejwt.views import (
 )
 
 from .views import (
+    LandlordAgentTeamView,
     RegistrationView,
     LoginView,
     LogoutView,
@@ -13,7 +14,9 @@ from .views import (
     PasswordResetConfirmView,
     PasswordResetView,
     ForgotPasswordView,
-    UserDetailsView,
+    UserListView,
+    UserDetailView,
+    CreateAgentView,
     AdminRegisterUserView,
 )
 
@@ -34,9 +37,11 @@ urlpatterns = [
         name="confirm_password",
     ),
     path("reset-password-confirm", PasswordResetView.as_view(), name="reset_password"),
-    path("users/", UserDetailsView.as_view(), name="user_list"),
-    path("user/add", AdminRegisterUserView.as_view(), name="add_user"),
-    path("users/<int:id>", UserDetailsView.as_view(), name="user_detail"),
+    path("users", UserListView.as_view(), name="user-list"),
+    path("users/<int:pk>", UserDetailView.as_view(), name="user-detail"),
+    path("users/create-agent/", CreateAgentView.as_view(), name="create-agent"),
+    path("user/add/", AdminRegisterUserView.as_view(), name="add_user"),
+    # path("user/agent-team", LandlordAgentTeamView.as_view(), name="agent_team"),
     path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("token/verify/", TokenVerifyView.as_view(), name="token_verify"),
