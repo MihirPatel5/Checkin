@@ -1,14 +1,18 @@
 import re
-from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth import authenticate
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes
 from django.contrib.auth.tokens import default_token_generator
 from django.conf import settings
-from rest_framework import status, generics, permissions
+from django.utils.crypto import get_random_string
+from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
+from rest_framework import status, generics, permissions, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from parler.utils.context import switch_language
 
 from .serializers import (
     RegisterSerializer,
@@ -18,10 +22,13 @@ from .serializers import (
     ForgotPasswordSerializer,
     PasswordResetConfirmSerializer,
     AdminRegisterUserSerializer,
+    AgentCreateSerializer,
 )
 from utils.email_services import Email
 from utils.translation_services import TranslateService
-from .models import User
+from .models import LandlordAgentRelationship, User
+from .permissions import CanViewUser, CanEditUser, CanDeleteUser
+from authentication import models
 
 
 translator = TranslateService()
@@ -132,21 +139,14 @@ class LoginView(APIView):
                     {"error": "Your account is not activated. Please verify your email."},
                     status=status.HTTP_403_FORBIDDEN
                 )
-            user_language = request.data.get("language", "en")
-            if not user.has_translation(user_language):
-                return Response(
-                    {
-                        "error": "User does not have a translation for the current language."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            refresh = RefreshToken.for_user(user)
+            with switch_language(user, 'en'):
+                refresh = RefreshToken.for_user(user)
+                user_data = UserSerializer(user, context={"request": request}).data
             return Response(
                 {
                     "refresh": str(refresh),
                     "access": str(refresh.access_token),
-                    "user": UserSerializer(user, context={"request": request}).data,
+                    "user": user_data,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -154,7 +154,7 @@ class LoginView(APIView):
         except Exception as e:
             return handle_response(
                 {"error": f"Login Invalid. {str(e)}"},
-                status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
 
@@ -178,7 +178,7 @@ class LogoutView(APIView):
                 {"message": "Logout successful"}, status.HTTP_205_RESET_CONTENT, request
             )
 
-        except Exception as e:
+        except Exception:
             return handle_response(
                 {"error": "Invalid or expired token"},
                 status.HTTP_400_BAD_REQUEST, request
@@ -261,128 +261,31 @@ class PasswordResetView(APIView):
         return handle_response(serializer.errors, status.HTTP_400_BAD_REQUEST, request)
 
 
-class UserDetailsView(APIView):
-    permission_classes = [IsAuthenticated]
-    """Handle retrive, updating and deletion of User by ID"""
+class UserListView(generics.ListAPIView):
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    queryset = User.objects.all()
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["email", "first_name", "last_name", "role"]
 
-    def get(self, request, id=None):
-        try:
-            if id:
-                user = User.objects.get(id=id)
-                if request.user.is_superadmin():
-                    pass
-                elif request.user.role == User.ADMIN:
-                    if user.role not in [User.ADMIN, User.SUPERADMIN]:
-                        return handle_response(
-                            {"error": "You do not have permission to view this user."},
-                            status.HTTP_403_FORBIDDEN,
-                            request,
-                        )
-                elif request.user.id != user.id:
-                    return handle_response(
-                        {"error": "You do not have permission to view this user."},
-                        status.HTTP_403_FORBIDDEN,
-                        request,
-                    )
-                language = request.query_params.get("language", "en")
-                user.set_current_language(language)
-                serializer = UserSerializer(user, context={"request": request, "language": language})
-                return Response(serializer.data, status=status.HTTP_200_OK)
- 
-            else:
-                if request.user.is_superadmin():
-                    pass
-                elif request.user.role == User.ADMIN:
-                    if user.role not in [User.ADMIN, User.SUPERADMIN]:
-                        return handle_response(
-                            {"error": "You do not have permission to view this user."},
-                            status.HTTP_403_FORBIDDEN,
-                            request,
-                        )
-                # elif request.user.id != user.id:
-                #     return handle_response(
-                #         {"error": "You do not have permission to view this user."},
-                #         status.HTTP_403_FORBIDDEN,
-                #         request,
-                #     )
-                users = User.objects.all()
-                serializer = UserSerializer(users, many=True, context={"request": request})
-                return Response(serializer.data, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return handle_response(
-                {"error": f"User not found for ID {id}"},
-                status.HTTP_404_NOT_FOUND,
-                request,
-            )
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
 
-    def put(self, request, id):
-        try:
-            user = User.objects.get(id=id)
-            if "role" in request.data and request.data["role"] != user.role:
-                if not request.user.is_superadmin():
-                    return handle_response(
-                        {"error": "Only SuperAdmin can change roles."},
-                        status.HTTP_403_FORBIDDEN,
-                        request,
-                    )
-            if request.user.id != user.id and not request.user.is_superadmin():
-                return handle_response(
-                    {"error": "You do not have permission to update this user."},
-                    status.HTTP_403_FORBIDDEN,
-                    request,
-                )
-            serializer = UserSerializer(user, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_200_OK)
-                # return handle_response(serializer.data, status.HTTP_200_OK, request)
-            return handle_response(
-                serializer.errors, status.HTTP_400_BAD_REQUEST, request
-            )
-        except User.DoesNotExist:
-            return handle_response(
-                {"error": f"User not found for {id}"},
-                status.HTTP_404_NOT_FOUND,
-                request,
-            )
+        if user.role == "SuperAdmin":
+            return qs
+        elif user.role == "Admin":
+            return qs.exclude(Q(role="SuperAdmin") | Q(role="Admin"))
+        elif user.role == "Landlord":
+            return qs.filter(Q(id=user.id) | Q(role="Agent", created_by=user))
+        elif user.role == "Agent":
+            return qs.filter(id=user.id)
+        return User.objects.none()
 
-    def delete(self, request, id):
-        try:
-            user = User.objects.get(id=id)
-            if request.user.id == user.id:
-                pass
-            elif request.user.is_superadmin():
-                if user.role == User.SUPERADMIN:
-                    return handle_response(
-                        {"error": "SuperAdmin cannot delete another SuperAdmin."},
-                        status.HTTP_403_FORBIDDEN,
-                        request,
-                    )
-                pass
-            elif request.user.role == User.ADMIN:
-                if user.role in [User.SUPERADMIN, User.ADMIN]:
-                    return handle_response(
-                        {"error": "Admins cannot delete other Admins or SuperAdmins."},
-                        status.HTTP_403_FORBIDDEN,
-                        request,
-                    )
-                pass
-            else:
-                return handle_response(
-                    {"error": "You do not have permission to delete this user."},
-                    status.HTTP_403_FORBIDDEN,
-                    request,
-                )
-            user.delete()
-            return handle_response(
-                {"message": "User deleted successfully!"}, status.HTTP_200_OK, request
-            )
-        except User.DoesNotExist:
-            return handle_response(
-                {"error": f"User not found for {id}."},
-                status.HTTP_404_NOT_FOUND,
-                request,
-            )
+class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated, CanViewUser, CanEditUser, CanDeleteUser]
+    queryset = User.objects.all()
 
 
 class AdminRegisterUserView(generics.CreateAPIView):
@@ -391,3 +294,46 @@ class AdminRegisterUserView(generics.CreateAPIView):
 
     def post(self, request, *args, **kwargs):
         return super().post(request, *args, **kwargs)
+
+
+class LandlordAgentTeamView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        if request.user.role != User.LANDLORD:
+            return handle_response(
+                {"error": "Only landlords can view their agent team"},
+                status.HTTP_403_FORBIDDEN,
+                request
+            )
+        relationships = LandlordAgentRelationship.objects.filter(landlord=request.user)
+        agents = [rel.agent for rel in relationships]
+        serializer = UserSerializer(agents, many=True, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class CreateAgentView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            if request.user.role != User.LANDLORD:
+                return Response({"detail": _("Only landlords can create agents.")}, status=status.HTTP_403_FORBIDDEN)
+
+            data = request.data.copy()
+            serializer = AgentCreateSerializer(data=data, context={"request": request})
+
+            if serializer.is_valid():
+                agent = serializer.save()
+                LandlordAgentRelationship.objects.create(landlord=request.user, agent=agent)
+                return Response(
+                    {"detail": _("Agent created and credentials sent via email.")},
+                    status=status.HTTP_201_CREATED,
+                )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            return handle_response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

@@ -1,4 +1,7 @@
 import requests,logging, base64
+import certifi
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 logger = logging.getLogger(__name__)
@@ -49,8 +52,9 @@ def send_validation_request(xml_data, ws_user, ws_password, verify_ssl=True):
             "Content-Type": "application/xml",
             "Accept": "application/xml"
         }
+        verify = certifi.where() if verify_ssl else False
 
-        response = requests.post(SES_URL, data=xml_data, headers=headers)
+        response = requests.post(SES_URL, data=xml_data, headers=headers, verify=False)
 
         logger.info(f"SES request sent. Status: {response.status_code}")
         logger.debug(f"Request headers: {headers}")

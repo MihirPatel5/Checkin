@@ -25,7 +25,6 @@ class Property(TranslatableModel):
         default="apartment"
     )
     name = models.CharField(max_length=255, verbose_name="Property Name",null=True, blank=True)
-    location = models.CharField(max_length=255, verbose_name="Location",null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Price")
     owner = models.ForeignKey(
         "authentication.user", on_delete=models.CASCADE, related_name="property_owner"
@@ -67,6 +66,7 @@ class Property(TranslatableModel):
                     verify_ssl=False
                 )
                 self.ses_status = success
+                print('success: ', success)
                 return success
             except Exception as e:
                 self.ses_status = False
@@ -82,6 +82,7 @@ class PropertyImage(models.Model):
     )
     name = models.CharField(null=True, blank=True)
     image = models.ImageField(upload_to='properties_images/')
+    name = models.CharField(null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
 
@@ -91,5 +92,5 @@ class IsLanlordOrAdmin(permissions.BasePermission):
     
 
 class IsSuperAdmin(permissions.BasePermission):
-    def has_permission(self, request, view):
+    def has_permission(self, request, view):    
         return request.user.role == "SuperAdmin"

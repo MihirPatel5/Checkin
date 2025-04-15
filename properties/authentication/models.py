@@ -10,7 +10,7 @@ from parler.models import TranslatableModel, TranslatedFields
 
 
 class UserManager(BaseUserManager):
-    def create_user(self, email, password=None, phone_number=None, role="Guest", **extra_fields):
+    def create_user(self, email, password=None, phone_number=None, **extra_fields):
         if not email:
             raise ValueError("The Email field is required")
         if not phone_number:
@@ -19,27 +19,61 @@ class UserManager(BaseUserManager):
         username = extra_fields.pop("username", email.split("@")[0])
         first_name = extra_fields.pop("first_name", "")
         last_name = extra_fields.pop("last_name", "")
-        language = extra_fields.pop("language", "en")
+        # language = extra_fields.pop("language", "en")
         user = self.model(
             email=email,
-            role=role,
             username=username,
+            phone_number=phone_number,
+            first_name=first_name,
+            last_name=last_name,
+            role="Landlord",
             **extra_fields
         )
         user.set_password(password)
         user.save(using=self._db)
-
-        user.create_translation(
-            language_code=language, first_name=first_name, last_name=last_name
-        )
         return user
 
-    def create_superuser(self, email, phone_number=None, password=None, **extra_fields):
-        """Creates and returns a SuperAdmin user."""
-        extra_fields.setdefault("is_staff", True)
-        extra_fields.setdefault("is_superuser", True)
-        extra_fields.setdefault("is_active", True)
-        return self.create_user(email, password, phone_number, role="SuperAdmin", **extra_fields)
+    def create_agent(self, landlord, email, password=None, first_name=None, last_name=None, phone_number=None, **extra_fields):
+        user = self.model(
+            email=self.normalize_email(email),
+            phone_number=phone_number,
+            role=User.AGENT,
+            first_name=first_name,
+            last_name=last_name,
+            is_active=True,
+            created_by=landlord,
+            **extra_fields,
+        )
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_admin(self, superadmin, email, password=None, phone_number=None, **extra_fields):
+        if superadmin.role != "SuperAdmin":
+            raise PermissionError("Only SuperAdmins can create Admins")
+        user = self.model(
+            email=self.normalize_email(email),
+            phone_number=phone_number,
+            role="Admin",
+            is_staff=True,
+            **extra_fields
+        )
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password=None, phone_number=None, **extra_fields):
+        user = self.model(
+            email=self.normalize_email(email),
+            phone_number=phone_number,
+            role="SuperAdmin",
+            is_staff=True,
+            is_superuser=True,
+            **extra_fields
+        )
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
 
 
 class User(AbstractBaseUser, PermissionsMixin, TranslatableModel):
@@ -58,6 +92,7 @@ class User(AbstractBaseUser, PermissionsMixin, TranslatableModel):
     translations = TranslatedFields(
         first_name=models.CharField(max_length=150),
         last_name=models.CharField(max_length=150),
+        language=models.CharField(max_length=10, default="en"),
     )
 
     SUPERADMIN = "SuperAdmin"
@@ -74,15 +109,15 @@ class User(AbstractBaseUser, PermissionsMixin, TranslatableModel):
         (GUEST, "Guest"),
     ]
 
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=GUEST)
-
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="Guest")
+    created_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_users")
     objects = UserManager()
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["phone_number"]
 
     def __str__(self):
-        return self.email
+        return f"{self.email} ({self.role})"
 
     def is_superadmin(self):
         return self.role == self.SUPERADMIN
@@ -92,3 +127,15 @@ class User(AbstractBaseUser, PermissionsMixin, TranslatableModel):
 
     def get_short_name(self):
         return self.first_name or self.email
+
+
+class LandlordAgentRelationship(models.Model):
+    landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name='agent_teams')
+    agent = models.ForeignKey(User, on_delete=models.CASCADE, related_name='landlord_connections')
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('landlord', 'agent')
+        
+    def __str__(self):
+        return f"{self.landlord.email} - {self.agent.email}"
