@@ -80,7 +80,6 @@ class RegisterSerializer(serializers.ModelSerializer):
 class AgentCreateSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(write_only=True)
     last_name = serializers.CharField(write_only=True)
-
     class Meta:
         model = User
         fields = ["email", "first_name", "last_name", "phone_number"]
@@ -197,7 +196,6 @@ class PasswordResetSerializer(serializers.Serializer):
         return data
 
 class AdminRegisterUserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(required=True)
     last_name = serializers.CharField(required=True)
     # language = serializers.CharField(write_only=True, required=False, default="en")
@@ -234,7 +232,7 @@ class AdminRegisterUserSerializer(serializers.ModelSerializer):
         role = validated_data.get("role", "Guest")
         phone_number = validated_data.pop("phone_number")
 
-        user = User.objects.create(
+        user = User.objects.create_user(
             email=validated_data["email"],
             username=validated_data["email"].split("@")[0],
             role=role,

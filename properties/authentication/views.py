@@ -27,7 +27,7 @@ from .serializers import (
 from utils.email_services import Email
 from utils.translation_services import TranslateService
 from .models import LandlordAgentRelationship, User
-from .permissions import CanViewUser, CanEditUser, CanDeleteUser
+from .permissions import CanViewUser, CanEditUser, CanDeleteUser, IsSuperAdmin, IsSuperOrAdmin
 from authentication import models
 
 
@@ -290,7 +290,7 @@ class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class AdminRegisterUserView(generics.CreateAPIView):
     serializer_class = AdminRegisterUserSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAuthenticated, IsSuperOrAdmin]
 
     def post(self, request, *args, **kwargs):
         return super().post(request, *args, **kwargs)
@@ -322,7 +322,6 @@ class CreateAgentView(APIView):
 
             data = request.data.copy()
             serializer = AgentCreateSerializer(data=data, context={"request": request})
-
             if serializer.is_valid():
                 agent = serializer.save()
                 LandlordAgentRelationship.objects.create(landlord=request.user, agent=agent)
