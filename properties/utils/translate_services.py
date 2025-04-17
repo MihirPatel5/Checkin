@@ -50,20 +50,19 @@ openai.api_key = settings.OPENAI_API_KEY
 TARGET_LANGUAGES = ['fr', 'es', 'de', 'it', 'pt', 'en']
 
 def translate_text(text, target_lang):
-    print('target_lang: ', target_lang)
     prompt = f"Translate the following to {target_lang}:\n\n{text}"
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3
     )
-    print('response[): ', response['choices'][0]['message']['content'].strip())
     return response['choices'][0]['message']['content'].strip()
 
 def generate_translations(source_data: dict, source_lang: str) -> dict:
     translations = {source_lang: source_data}
 
     for lang in TARGET_LANGUAGES:
+        print('lang: ', lang)
         if lang == source_lang:
             continue
         lang_fields = {}

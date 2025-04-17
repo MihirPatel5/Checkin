@@ -92,5 +92,5 @@ class IsLanlordOrAdmin(permissions.BasePermission):
     
 
 class IsSuperAdmin(permissions.BasePermission):
-    def has_permission(self, request, view):    
+    def has_permission(self, request, view):
         return request.user.role == "SuperAdmin"

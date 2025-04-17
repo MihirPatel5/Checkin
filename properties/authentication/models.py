@@ -19,6 +19,7 @@ class UserManager(BaseUserManager):
         username = extra_fields.pop("username", email.split("@")[0])
         first_name = extra_fields.pop("first_name", "")
         last_name = extra_fields.pop("last_name", "")
+        role = extra_fields.pop("role", "")
         # language = extra_fields.pop("language", "en")
         user = self.model(
             email=email,
@@ -26,7 +27,7 @@ class UserManager(BaseUserManager):
             phone_number=phone_number,
             first_name=first_name,
             last_name=last_name,
-            role="Landlord",
+            role=role,
             **extra_fields
         )
         user.set_password(password)
