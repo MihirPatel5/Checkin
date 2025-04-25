@@ -117,6 +117,30 @@ class PropertyDetailAPIView(APIView):
         return Response({"message": "Property deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
+class MultipleDeletePropertyAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsOwnerOrAdmin]
+
+    def delete(self, request):
+        property_ids = request.data.get("property_ids")
+        if not property_ids:
+            return Response({"error": "No property IDs provided"}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(property_ids, list):
+            return Response({"error": "property_ids must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        deleted_count = 0
+        errors = []
+        for prop_id in property_ids:
+            try:
+                property_instance = get_object_or_404(Property, id=prop_id)
+                property_instance.delete()
+                deleted_count += 1
+            except Exception as e:
+                errors.append({"property_id": prop_id, "error": str(e)})
+        return Response({
+            "message": f"{deleted_count} properties deleted successfully",
+            "errors": errors if errors else None
+        }, status=status.HTTP_207_MULTI_STATUS if errors else status.HTTP_204_NO_CONTENT)
+
+
 class ConnectSESAPIView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrSuperAdmin]
 

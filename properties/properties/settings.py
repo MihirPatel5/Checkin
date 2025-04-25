@@ -56,7 +56,8 @@ THIRD_PARTY_APPS = [
 
 LOCAL_APPS = [
     "authentication",
-    "property"
+    "property",
+    "checkin",
 ]
 
 AUTH_USER_MODEL = "authentication.User"
