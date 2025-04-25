@@ -90,11 +90,9 @@ class PropertySerializer(TranslatableModelSerializer):
         property_instance.ses_status = False
         
         if all([ws_user, ws_password, est_code, landlord_code]):
-            logger.info(f"SES validation initiated for property {property_instance.id}")
             try:
                 xml_data = generate_ses_xml(est_code)
                 success, ses_response = send_validation_request(xml_data, ws_user, ws_password, landlord_code)
-                logger.info(f"SES validation result: {success}, response: {ses_response}")
                 property_instance.ses_status = success
                 if not success:
                     logger.warning(f"SES validation failed with message: {ses_response}")
