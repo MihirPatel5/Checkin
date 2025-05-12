@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Check-in Confirmation</title>
+</head>
+<body>
+    <h2>Check-in Confirmation for {{ property.name }}</h2>
+    <p>Dear {{ check_in.lead_guest_name }},</p>
+    <p>Your check-in information has been successfully submitted for:</p>
+    
+    <ul>
+        <li><strong>Property:</strong> {{ property.name }}</li>
+        <li><strong>Check-in Date:</strong> {{ check_in.check_in_date|date:"F j, Y H:i" }}</li>
+        <li><strong>Check-out Date:</strong> {{ check_in.check_out_date|date:"F j, Y H:i" }}</li>
+        <li><strong>Number of Guests:</strong> {{ check_in.total_guests }}</li>
+    </ul>
+    
+    <p>Thank you for completing the check-in process.</p>
+    
+    <p>Best regards,<br>
+    {{ property.owner.get_full_name|default:property.owner.username }}</p>
+</body>
+</html>

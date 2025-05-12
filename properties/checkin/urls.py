@@ -1,42 +1,27 @@
 from django.urls import path
 from .views import (
-    GenerateCheckInLinkAPIView,
-    CheckInByLinkAPIView,
-    SubmitCheckInAPIView,
-    MunicipalitySearchAPIView,
-    CheckInListByPropertyView,
-    GenerateDailyReportAPIView
+    ReservationCreateAPIView,
+    CheckInCreateAPIView,
+    ReservationSearchAPIView,
+    PropertyICalViewSet
 )
 
 urlpatterns = [
     path(
-        'reservations/generate-link/',
-        GenerateCheckInLinkAPIView.as_view(),
-        name='generate-checkin-link'
+        'reservations/', 
+        ReservationCreateAPIView.as_view()
     ),
     path(
-        'checkin/<str:link_id>/',
-        CheckInByLinkAPIView.as_view(),
-        name='checkin-by-link'
+        'checkin/<str:check_in_link>/', 
+        CheckInCreateAPIView.as_view()
     ),
     path(
-        'checkin/<str:link_id>/submit/',
-        SubmitCheckInAPIView.as_view(),
-        name='submit-checkin'
+        'ical/<uuid:property_id>/', 
+        PropertyICalViewSet.as_view({'get': 'list', 'post': 'create'})
     ),
     path(
-        'municipalities/',
-        MunicipalitySearchAPIView.as_view(),
-        name='municipality-search'
+        'search/', 
+        ReservationSearchAPIView.as_view()
     ),
-    path(
-        'properties/<uuid:property_id>/checkins/',
-        CheckInListByPropertyView.as_view(),
-        name='property-checkins-list'
-    ),
-    path(
-        'reports/daily-checkins/',
-        GenerateDailyReportAPIView.as_view(),
-        name='daily-checkins-report'
-    ),
+
 ]
