@@ -1,12 +1,13 @@
 from rest_framework import serializers
 from rest_framework.serializers import ValidationError
 from .models import (
-    Guest, CheckIn, Municipality, IdentityDocumentType, CheckInStatus,
-    GuardianRelationship, GuestbookEntry, PoliceSubmissionLog
+    DataRetentionPolicy, Guest, CheckIn, Municipality, IdentityDocumentType, CheckInStatus,
+    GuardianRelationship, GuestbookEntry, PoliceSubmissionLog, PropertyICal, Reservation
 )
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from django.conf import settings
+from django.db import transaction
 import phonenumbers
 
 class MunicipalitySerializer(serializers.ModelSerializer):
@@ -15,28 +16,49 @@ class MunicipalitySerializer(serializers.ModelSerializer):
         fields = ['codigo_municipio', 'nombre_municipio', 'provincia', 'codigo_postal']
 
 class GuestSerializer(serializers.ModelSerializer):
-    id_photo = serializers.ImageField(required=False)
     age = serializers.SerializerMethodField()
-    municipality = serializers.DictField(child=serializers.CharField(), required=False)
+    is_minor = serializers.BooleanField(read_only=True)
+    document_type = serializers.ChoiceField(
+        choices=IdentityDocumentType.choices,
+        required=True
+    )
+    municipality = serializers.DictField(child=serializers.CharField(), required=False, allow_null=True)
+    translations = serializers.JSONField(required=False, read_only=True)
+    is_lead = serializers.BooleanField(required=False, default=False)
+    second_surname = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     permission_class = []
 
     class Meta:
         model = Guest
         fields = [
-            'id', 'full_name', 'first_surname', 'second_surname',
-            'document_type', 'document_number', 'support_number',
-            'nationality', 'date_of_birth', 'age', 'address', 'postal_code',
-            'city', 'country_of_residence', 'is_lead_guest', 'is_minor',
-            'id_photo', 'municipality', 'gender',
+            'id', 'full_name', 'first_surname', 'second_surname',"is_lead",
+            'document_type', 'document_number', 'support_number', 'is_minor',
+            'nationality', 'date_of_birth', 'age', 'country_of_residence',
+            'id_photo', 'municipality', 'gender', 'purpose_of_stay',
             'codigo_municipio', 'nombre_municipio', 'codigo_postal', 'provincia',
+            'gdpr_consent', 'anonymized', 'translations'
         ]
-        read_only_fields = ['is_minor', 'age']
+        read_only_fields = ['is_minor', 'age', 'anonymized', 'translations']
 
     def get_age(self, obj):
         return obj.age
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if not (request and request.user.is_staff):
+            lang = getattr(request, 'LANGUAGE_CODE', settings.LANGUAGE_CODE)
+            translatable_fields = {
+                'full_name': instance.get_translation('full_name', lang),
+                'purpose_of_stay': instance.get_translation('purpose_of_stay', lang)
+            }
+            data.update(translatable_fields)
+        return data
+
     def validate(self, data):
         property_country = self.context.get('property_country', None)
+        nationality = data.get('nationality')
+        document_type = data.get('document_type')
         if 'phone' in data:
             try:
                 phone = phonenumbers.parse(data['phone'], None)
@@ -44,8 +66,8 @@ class GuestSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({"phone": _("Invalid phone number")})
             except:
                 raise serializers.ValidationError({"phone": _("Invalid phone number format")})
-        if property_country == 'ES' and data.get('nationality') == 'ES':
-            if data.get('document_type') not in ['dni', 'nie']:
+        if property_country == 'ES' and nationality == 'ES':
+            if document_type not in ['dni', 'nie']:
                 raise serializers.ValidationError({
                     "document_type": _("Spanish guests must provide DNI or NIE")
                 })
@@ -57,277 +79,181 @@ class GuestSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "municipality": _("Municipality is required for Spanish guests")
                 })
-        else:
-            if data.get('document_type') != IdentityDocumentType.PASSPORT:
-                raise serializers.ValidationError({
-                    "document_type": _("Non-Spanish guests must provide passport")
-                })
+        elif document_type != 'passport' and nationality != 'ES':
+            raise serializers.ValidationError({
+                "document_type": _("Non-Spanish guests must provide passport")
+            })
         if data.get('date_of_birth') and data.get('date_of_birth') > timezone.now().date():
             raise serializers.ValidationError({
                 "date_of_birth": _("Date of birth cannot be in the future")
             })
         return data
+    
+    def create(self, validated_data):
+        municipality_data = validated_data.pop('municipality', None)
+        if municipality_data:
+            validated_data['codigo_municipio'] = municipality_data.get('codigo_municipio')
+            validated_data['nombre_municipio'] = municipality_data.get('nombre_municipio')
+            validated_data['codigo_postal'] = municipality_data.get('codigo_postal')
+            validated_data['provincia'] = municipality_data.get('provincia')
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        municipality_data = validated_data.pop('municipality', None)
+        if municipality_data:
+            validated_data['codigo_municipio'] = municipality_data.get('codigo_municipio')
+            validated_data['nombre_municipio'] = municipality_data.get('nombre_municipio')
+            validated_data['codigo_postal'] = municipality_data.get('codigo_postal')
+            validated_data['provincia'] = municipality_data.get('provincia')
+        return super().update(instance, validated_data)
 
 
 class GuardianRelationshipSerializer(serializers.Serializer):
     "Seriaizer for Guardian Relationship"
     class Meta:
         model = GuardianRelationship
-        fields = ['minor', 'guardian', 'relationship_type']
-    minor = serializers.CharField()
-    guardian = serializers.CharField()
-    relationship_type = serializers.CharField()
-    
+        fields = ['minor', 'guardian', 'relationship_type', 'verified']
+        read_only_fields = ['verified']
+
     def validate(self, data):
+        minor = data.get('minor')
+        guardian = data.get('guardian')
+        if not minor or not guardian:
+            raise serializers.ValidationError(_("Both minor and guardian must be specified."))
+        if minor == guardian:
+            raise serializers.ValidationError(_("Guardian and minor cannot be the same person"))
+        if minor.age >= 18:
+            raise serializers.ValidationError(_("Minor must be under 18 years old"))
+        if guardian.age < 18:
+            raise serializers.ValidationError(_("Guardian must be an adult"))
         return data
 
-
-class CheckInLinkSerializer(serializers.ModelSerializer):
-    check_in_url = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = CheckIn
-        fields = ['id', 'check_in_link', 'check_in_url', 'property_ref', 'lead_guest_name', 
-                 'lead_guest_email', 'lead_guest_phone', 'total_guests',
-                 'check_in_date', 'check_out_date']
-        read_only_fields = ['id', 'check_in_link', 'check_in_url']
-    
-    def get_check_in_url(self, obj):
-        return f"{settings.FRONTEND_URL}/guest-checkin/{obj.check_in_link}"
-
-
-class CheckInCreateSerializer(serializers.ModelSerializer):
-    """serializer for creating a CheckIn with guest"""
+class CheckInSerializer(serializers.ModelSerializer):
     guests = GuestSerializer(many=True)
     guardian_relationships = GuardianRelationshipSerializer(many=True, required=False)
+    digital_signature = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         model = CheckIn
         fields = [
-            'id', 'guests', 'guardian_relationships',
-            'lead_guest_name', 'lead_guest_email',
-            'lead_guest_phone', 'total_guests', 'check_in_date',
-            'check_out_date', 'purpose_of_stay', 'auto_submit_to_police',
-            'digital_signature'
+            'id', 'reservation', 'guests', 'guardian_relationships',
+            'status', 'digital_signature', 'ip_address', 'initiated_at',
+            'completed_at'
         ]
-        read_only_fields = ['id']
-    
+        read_only_fields = ['status', 'ip_address', 'initiated_at', 'completed_at']
+
     def validate(self, data):
-        property_country = self.context.get('property_country', None)
-        if 'guests' in data and len(data['guests']) != data.get('total_guests', 0):
-            raise ValidationError({
-                'total_guests': _("The number of guests provided does not match the total_guests value")
-            })
-        if data.get('check_in_date') and data.get('check_out_date'):
-            if data['check_in_date'] >= data['check_out_date']:
-                raise ValidationError({
-                    "check_out_date":_('Check out date must be after check-in date')
-                })
-        if property_country == 'ES':
-            spanish_guests = [g for g in data.get('guests', []) if g.get('nationality') == 'ES']
-            for guest in spanish_guests:
-                if not guest.get('municipality'):
-                    raise ValidationError({
-                        "municipality": _("Spanish guests must have municipality specified")
-                    })
+        guests = data.get('guests', [])
+        reservation = self.context.get('reservation')
+        if not any(g.get('is_lead', False) for g in guests):
+            raise serializers.ValidationError(_("At least one lead guest is required"))
+        if reservation and len(guests) != reservation.total_guests:
+            raise serializers.ValidationError(
+                _("Guest count mismatch. Expected %(expected)d, got %(actual)d") % {
+                    'expected': reservation.total_guests,
+                    'actual': len(guests)
+                }
+            )
         return data
 
     def create(self, validated_data):
-        guests_data = validated_data.pop('guests', [])
-        guardian_relationships_data = validated_data.pop('guardian_relationships', [])
-        
-        check_in = CheckIn.objects.create(**validated_data)
-        guests_mapping = {}
-
-        for guest_data in guests_data:
-            if 'municipality' in guest_data:
-                municipality_data = guest_data.pop('municipality')
-                municipality = Municipality.objects.get(
-                    codigo_municipio=municipality_data['codigo_municipio'],
-                    nombre_municipio=municipality_data['nombre_municipio']
-                )
-                guest_data['municipality'] = municipality
-            guest = Guest.objects.create(check_in=check_in, **guest_data)
-            guests_mapping[str(guest.id)] = guest            
-            
-            if guest_data.get('is_lead_guest'):
-                check_in.lead_guest_name = guest.full_name
-                check_in.lead_guest_email = validated_data.get('lead_guest_email')
-                check_in.lead_guest_phone = validated_data.get('lead_guest_phone')
-                check_in.save()
-        for relationship_data in guardian_relationships_data:
-            minor_id = relationship_data.get('minor')
-            guardian_id = relationship_data.get('guardian')            
-            try:
-                minor = Guest.objects.get(id=minor_id, check_in=check_in)
-                guardian = Guest.objects.get(id=guardian_id, check_in=check_in)
-                if not minor.is_minor:
-                    raise ValidationError("The specified guest is not a minor.")
-                if guardian.is_minor:
-                    raise ValidationError("A guardian cannot be a minor.")
-                if minor == guardian:
-                    raise ValidationError("A guest cannot be their own guardian.")
+        guests_data = validated_data.pop('guests')
+        relationships_data = validated_data.pop('guardian_relationships', [])
+        with transaction.atomic():
+            check_in = CheckIn.objects.create(**validated_data)
+            guests = []
+            minors = []
+            for guest_data in guests_data:
+                municipality_data = guest_data.pop('municipality', None)
+                if municipality_data:
+                    guest_data['codigo_municipio'] = municipality_data.get('codigo_municipio')
+                    guest_data['nombre_municipio'] = municipality_data.get('nombre_municipio')
+                    guest_data['codigo_postal'] = municipality_data.get('codigo_postal')
+                    guest_data['provincia'] = municipality_data.get('provincia')
+                if 'last_surname' in guest_data:
+                    guest_data['second_surname'] = guest_data.pop('last_surname')
+                guest = Guest.objects.create(check_in=check_in, **guest_data)
+                guests.append(guest)
+                if guest.is_minor:
+                    minors.append(guest)
+            for rel_data in relationships_data:
                 GuardianRelationship.objects.create(
-                    minor=minor,
-                    guardian=guardian,
-                    relationship_type=relationship_data.get('relationship_type')
+                    minor=rel_data['minor'],
+                    guardian=rel_data['guardian'],
+                    relationship_type=rel_data['relationship_type']
                 )
-            except Guest.DoesNotExist:
-                raise ValidationError("Invalid guardian or minor reference.")
-        return check_in
-
-class CheckInDetailSerializer(serializers.ModelSerializer):
-    """Serializer for retrieving CheckIn details"""
-    guests = GuestSerializer(many=True, read_only=True)
-    guardian_relationships = serializers.SerializerMethodField()
-    remaining_time = serializers.SerializerMethodField()
-
-    class Meta:
-        model = CheckIn
-        fields = [
-            'id', 'property_ref', 'lead_guest_name', 'lead_guest_email',
-            'lead_guest_phone', 'total_guests', 'check_in_date',
-            'check_out_date', 'status', 'purpose_of_stay',
-            'digital_signature', 'guests', 'guardian_relationships',
-            'created_at', 'updated_at', 'auto_submit_to_police',
-            'submission_date', 'remaining_time'
-        ]
-        read_only_fields = ['status', 'created_at', 'updated_at', 'submission_date']
-    
-    def get_guardian_relationships(self, obj):
-        """Get guardian relationships for the CheckIn"""
-        relationships = GuardianRelationship.objects.filter(
-            minor__check_in=obj
-        ).select_related('minor', 'guardian')
-        return GuardianRelationshipSerializer(relationships, many=True).data
-    
-    def get_remaining_time(self, obj):
-        """Get time remaining until check-in"""
-        now = timezone.now()
-        if obj.check_in_date > now:
-            time_diff = obj.check_out_date - now
-            print('time_diff: ', time_diff)
-            return {
-                'days': time_diff.days,
-                'hours': time_diff.seconds // 3600,
-                'minutes': (time_diff.seconds % 3600) // 60
-            }
-        return None
-
-
-class CheckInUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating CheckIn status"""
-    class Meta:
-        model = CheckIn
-        fields = ['status', 'auto_submit_to_police']
-
-
-class CheckInSubmitSerializer(serializers.ModelSerializer):
-    """Serializer for submitting a check-in"""
-    guests = GuestSerializer(many=True, required=True)
-    guardian_relationships = serializers.ListField(
-        child=serializers.DictField(),
-        required=False,
-        write_only=True
-    )
-    digital_signature = serializers.CharField(required=True)
-
-    class Meta:
-        model = CheckIn
-        fields = [
-            'id', 'guests', 'guardian_relationships',
-            'purpose_of_stay', 'digital_signature'
-        ]
-        read_only_fields = ['id']
-
-    def validate(self, data):
-        if not data.get('digital_signature'):
-            raise serializers.ValidationError({
-                "digital_signature": _("Digital signature is required")
-            })
-        if not any(guest.get('is_lead_guest', False) for guest in data.get('guests', [])):
-            raise serializers.ValidationError({
-                "guests": _("At least one guest must be the lead guest")
-            })
-        return data
-
-    def update(self, instance, validated_data):
-        guests_data = validated_data.pop('guests', [])
-        guardian_relationships_data = validated_data.pop('guardian_relationships', [])
-        if len(guests_data) > instance.total_guests:
-            raise ValidationError({"error":"Guest must registered or Guests are not more that total guests"})
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        created_guests = []
-        for guest_data in guests_data:
-            municipality_data = guest_data.pop('municipality', None)
-            if municipality_data:
-                guest_data.update({
-                    'codigo_municipio': municipality_data.get('municipio_id'),
-                    'nombre_municipio': municipality_data.get('municipio_nombre'),
-                    'codigo_postal': municipality_data.get('codigo_postal'),
-                    'provincia': guest_data.get('province'),
-                })
-            guest = Guest.objects.create(check_in=instance, **guest_data)
-            created_guests.append(guest)
-            if guest_data.get('is_lead_guest', False):
-                instance.lead_guest_name = f"{guest.full_name} {guest.first_surname}"
-                instance.lead_guest_email = guest_data.get('email', '')
-                instance.lead_guest_phone = guest_data.get('phone', '')
-        if guardian_relationships_data:
-            for rel_data in guardian_relationships_data:
-                try:
-                    minor_index = rel_data.get('minor_index')
-                    guardian_index = rel_data.get('guardian_index')                    
-                    if minor_index is None or guardian_index is None:
-                        raise ValidationError("Missing minor_index or guardian_index")
-                    minor = created_guests[minor_index]
-                    guardian = created_guests[guardian_index]
-                    if not minor.is_minor:
-                        raise ValidationError("The specified guest is not a minor.")
-                    if guardian.is_minor:
-                        raise ValidationError("A guardian cannot be a minor.")
-                    if minor.id == guardian.id:
-                        raise ValidationError("A guest cannot be their own guardian.")
-                    GuardianRelationship.objects.create(
-                        minor=minor,
-                        guardian=guardian,
-                        relationship_type=rel_data.get('relationship_type', 'parent')
+            for minor in minors:
+                if not GuardianRelationship.objects.filter(minor=minor).exists():
+                    raise serializers.ValidationError(
+                        _("No guardian specified for minor %(name)s") % {'name': minor.full_name}
                     )
-                except IndexError:
-                    raise ValidationError("Invalid guest index in relationship")
-                except Exception as e:
-                    raise ValidationError(str(e))
-        if instance.is_complete:
-            instance.status = CheckInStatus.CONFIRMED
-        instance.save()
-        return instance
+            return check_in
 
+class ReservationSerializer(serializers.ModelSerializer):
+    check_in_url = serializers.SerializerMethodField()
+    is_active = serializers.BooleanField(read_only=True)
+    property_ref = serializers.PrimaryKeyRelatedField(read_only=True)  # ✅ Make it read-only
 
-class GuestbookEntrySerializer(serializers.ModelSerializer):
-    """Serializer for guestbook entries"""
-    property_name = serializers.CharField(source='property.name', read_only=True)
-    lead_guest_name = serializers.CharField(source='check_in.lead_guest_name', read_only=True)
-    
     class Meta:
-        model = GuestbookEntry
+        model = Reservation
         fields = [
-            'id', 'property', 'property_name', 'check_in', 'lead_guest_name',
-            'generated_file', 'generation_date'
+            'id', 'reservation_code', 'property_ref', 'check_in_date',
+            'check_out_date', 'status', 'source', 'check_in_link',
+            'lead_guest_name', 'lead_guest_email', 'lead_guest_phone', 'total_guests',
+            'check_in_url', 'is_auto_submit', 'gdpr_compliant', 'is_active'
         ]
-        read_only_fields = ['generation_date']
+        read_only_fields = ['reservation_code', 'check_in_link', 'status', 'property_ref']
 
+    def get_check_in_url(self, obj):
+        return f"{settings.FRONTEND_URL}/guest-checkin/{obj.check_in_link}"
+
+    def validate_check_in_date(self, value):
+        if value < timezone.now():
+            raise ValidationError(_("Check-in date cannot be in the past"))
+        return value
 
 class PoliceSubmissionLogSerializer(serializers.ModelSerializer):
-    """Serializer for police submission logs"""
-    check_in_id = serializers.UUIDField(source='check_in.id', read_only=True)
-    property_name = serializers.CharField(source='check_in.property_ref.name', read_only=True)
-    lead_guest_name = serializers.CharField(source='check_in.lead_guest_name', read_only=True)
-    
+    xml_preview = serializers.SerializerMethodField()
+
     class Meta:
         model = PoliceSubmissionLog
         fields = [
-            'id', 'check_in', 'check_in_id', 'property_name', 'lead_guest_name',
-            'submitted_at', 'submitted_type', 'status', 'response_data', 'error_message'
+            'id', 'check_in', 'status', 'submitted_at', 'xml_version',
+            'xml_preview', 'retry_count', 'error_message'
         ]
-        read_only_fields = ['submitted_at', 'response_data', 'error_message']
+        read_only_fields = ['submitted_at', 'xml_version']
+
+    def get_xml_preview(self, obj):
+        return obj.raw_request[:100] + ' [...]' if obj.raw_request else ''
+
+class PropertyICalSerializer(serializers.ModelSerializer):
+    sync_status = serializers.SerializerMethodField()
+    last_synced = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S")
+
+    class Meta:
+        model = PropertyICal
+        fields = ['id', 'url', 'is_active', 'last_synced', 'sync_status']
+        read_only_fields = ['last_synced']
+
+    def get_sync_status(self, obj):
+        if not obj.last_synced:
+            return "Never synced"
+        return "Active" if obj.is_active else "Inactive"
+
+class DataRetentionPolicySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DataRetentionPolicy
+        fields = ['id', 'retention_period', 'auto_anonymize', 'last_cleanup']
+        extra_kwargs = {
+            'retention_period': {'min_value': 1095}
+        }
+
+class GuestbookEntrySerializer(serializers.ModelSerializer):
+    download_url = serializers.SerializerMethodField()
+    class Meta:
+        model = GuestbookEntry
+        fields = ['id', 'generation_date', 'download_url']
+        read_only_fields = ['generation_date']
+
+    def get_download_url(self, obj):
+        return obj.generated_file.url if obj.generated_file else None

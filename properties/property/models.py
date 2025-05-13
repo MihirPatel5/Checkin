@@ -35,6 +35,9 @@ class Property(TranslatableModel):
     postal_code = models.CharField(max_length=20, verbose_name="Postal Code", null=True,  blank=True)
     address = models.TextField(verbose_name="Address", null=True, blank=True)
     created_at = models.DateTimeField(auto_now=True)
+    code = models.CharField(null=True, blank=True)
+    max_guests = models.IntegerField(default=1, null=True, blank=True)
+    
     available = models.BooleanField(default=True, verbose_name="Availability")
     rating = models.DecimalField(
         max_digits=3, decimal_places=2, default=0.0, verbose_name="Rating"

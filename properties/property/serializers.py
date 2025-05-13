@@ -1,6 +1,9 @@
 import json, logging
 import os
+import random
+import string
 from django.utils.translation import get_language
+from django.conf import settings
 from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField
@@ -16,12 +19,23 @@ TRANSLATABLE_FIELDS = [
     "name", "address", "description", "amenities"
 ]
 
+def generate_unique_code(model, length=6):
+        """Generate unique alphanumeric code for models"""
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+        while model.objects.filter(code=code).exists():
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+        return code
+    
 class PropertyImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = PropertyImage
         fields = ['id', 'image', 'name','uploaded_at']
 
 class PropertySerializer(TranslatableModelSerializer):
+    code = serializers.CharField(read_only=True)
+    max_guests = serializers.IntegerField(required=True, min_value=1)
+    checkin_url = serializers.SerializerMethodField(read_only=True)
+
     translations = TranslatedFieldsField(shared_model=Property)
     webservice_username = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     webservice_password = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -43,7 +57,7 @@ class PropertySerializer(TranslatableModelSerializer):
             "country", "state", "city", "postal_code",
             "webservice_username", "webservice_password",
             "establishment_code", "landlord_code",
-            "images", "image"
+            "images", "image", "code", "max_guests", 'checkin_url'
         ]
         read_only_fields = ["id", "owner", "created_at"]
     
@@ -62,13 +76,17 @@ class PropertySerializer(TranslatableModelSerializer):
                 pass
                 
         return super().to_internal_value(data_copy)
- 
+    
+    def get_checkin_url(self, obj):
+        return f"{settings.FRONTEND_URL}/property/{obj.code}"
+    
     def create(self, validated_data):
         """
         Create a new property with translations
         """
         translations = validated_data.pop('translations', {})
         images = validated_data.pop('image', {})
+        validated_data['code']= generate_unique_code(Property)
         property_instance = Property.objects.create(
             owner=self.context['request'].user,
             **validated_data
@@ -162,6 +180,11 @@ class PropertySerializer(TranslatableModelSerializer):
 
             property_instance.save()
 
+    def split_amenities(amenities_str):
+        if not amenities_str:
+            return []
+        return [item.strip() for item in amenities_str.split(",") if item.strip()]
+
     def to_representation(self, instance):
         """
         Customize the output representation
@@ -179,7 +202,7 @@ class PropertySerializer(TranslatableModelSerializer):
             instance.set_current_language(lang_code)
             translations[lang_code] = {
             "description": instance.description,
-            "amenities": instance.amenities,
+            "amenities": PropertySerializer.split_amenities(instance.amenities),
             }
         data["translations"] = translations
         return data

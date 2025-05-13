@@ -46,6 +46,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             "last_name",
             # "language",
             "phone_number",
+            "role",
         ]
 
     def validate(self, attrs):
@@ -62,6 +63,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             user.first_name = validated_data.get("first_name", "")
             user.last_name = validated_data.get("last_name", "")
             user.save()
+        self.send_verification_email(user)
         return user
 
     def send_verification_email(self, user):
@@ -70,11 +72,10 @@ class RegisterSerializer(serializers.ModelSerializer):
         activation_link = f"{settings.FRONTEND_URL}/verify-email/{uid}/{token}/"
         subject = _("Verify your email address")
         body = _(f"Hi {user.first_name}, please verify your email by clicking the link below:\n{activation_link}")
-        Email.send_email(
-            subject=subject,
-            message=body,   
-            recipient_list=[user.email]
-        )
+        email = Email(subject=subject)
+        email.to(user.email)
+        email.add_text(body)
+        email.send()
 
 
 class AgentCreateSerializer(serializers.ModelSerializer):

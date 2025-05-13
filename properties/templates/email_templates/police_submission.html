@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Police Submission Notification</title>
+</head>
+<body>
+    <h2>Police Submission {% if success %}Success{% else %}Failed{% endif %}</h2>
+    <p>Dear Property Owner,</p>
+    
+    <p>The police submission for check-in at {{ property.name }} has {% if success %}been successfully completed{% else %}failed{% endif %}.</p>
+    
+    <h3>Check-in Details:</h3>
+    <ul>
+        <li><strong>Lead Guest:</strong> {{ check_in.lead_guest_name }}</li>
+        <li><strong>Check-in Date:</strong> {{ check_in.check_in_date|date:"F j, Y H:i" }}</li>
+        <li><strong>Check-out Date:</strong> {{ check_in.check_out_date|date:"F j, Y H:i" }}</li>
+    </ul>
+    
+    {% if not success %}
+    <p>Please review the submission and try again or contact support.</p>
+    {% endif %}
+    
+    <p>Best regards,<br>
+    Your Accommodation Team</p>
+</body>
+</html>

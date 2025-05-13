@@ -4,210 +4,236 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db import transaction
 from django.core.exceptions import PermissionDenied
-from .models import CheckIn, Municipality, CheckInStatus, GuardianRelationship
+from datetime import datetime, time, timedelta
+from .models import (
+    Reservation, PoliceSubmissionLog,
+    PropertyICal, DataRetentionPolicy, ReservationStatus
+)
 from .serializers import (
-    CheckInCreateSerializer, CheckInSubmitSerializer, CheckInLinkSerializer,
-    CheckInDetailSerializer, MunicipalitySerializer
+    ReservationSerializer, CheckInSerializer,
+    PropertyICalSerializer, DataRetentionPolicySerializer
 )
 from property.models import Property
-from .utils import send_checkin_confirmation, send_checkin_link_email, SESHospedajesService
+from .utils import (
+    send_checkin_confirmation,
+    send_checkin_link_email, 
+    SESHospedajesService,
+    send_police_submission_notification
+)
+from .tasks import submit_ses_report
 import logging
-import shortuuid
-
 logger = logging.getLogger(__name__)
 
-class GenerateCheckInLinkAPIView(APIView):
-    permission_classes = []
+class ReservationCreateAPIView(generics.CreateAPIView):
+    serializer_class = ReservationSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request):
-        try:
-            property_id = request.data.get('property_id')
-            property = get_object_or_404(Property, id=property_id)
-            # if not (request.user.is_staff or property.owner == request.user):
-            #     return Response(
-            #         {"error": "You don't have permission for this property"},
-            #         status=status.HTTP_403_FORBIDDEN
-            #     )
-            check_in = CheckIn.objects.create(
-                property_ref=property,
-                lead_guest_name=request.data.get('lead_guest_name'),
-                lead_guest_email=request.data.get('lead_guest_email'),
-                lead_guest_phone=request.data.get('lead_guest_phone'),
-                check_in_date=request.data.get('check_in_date'),
-                check_out_date=request.data.get('check_out_date'),
-                total_guests=request.data.get('total_guests', 1),
-                # reservation_id=reservation_id,
-                auto_submit_to_police=property.country == 'ES'
-            )
-            send_checkin_link_email(check_in, check_in.lead_guest_email, check_in.lead_guest_name)
-            serializer = CheckInLinkSerializer(check_in)
-            return Response({
-                "check_in_link": check_in.check_in_link,
-                "check_in_url": serializer.data['check_in_url'],
-                "message": "Check-in link generated successfully",
-                "data": serializer.data
-            }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            logger.error(f"Error generating check-in link: {str(e)}")
-            return Response({"error": f"Failed to generate check-in link: {str(e)}"},
-                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-class CheckInByLinkAPIView(APIView):
-    permission_classes = []
-    
-    def get(self, request, link_id):
-        try:
-            check_in = get_object_or_404(CheckIn, check_in_link=link_id)
-            municipalities = []
-            if check_in.property_ref.country == 'ES':
-                municipalities = Municipality.objects.all().order_by('nombre_municipio')
+    def perform_create(self, serializer):
+        property = get_object_or_404(Property, id=self.request.data.get('property_id'))
+        if not (self.request.user.is_staff or property.owner == self.request.user):
+            raise PermissionDenied
             
-            serializer = CheckInDetailSerializer(check_in)
-            municipality_serializer = MunicipalitySerializer(municipalities, many=True)
-            return Response({
-                'check_in': serializer.data,
-                'municipalities': municipality_serializer.data if municipalities else None,
-                'is_spanish_property': check_in.property_ref.country == 'ES'
-            })
-        except Exception as e:
-            logger.error(f"Error getting check-in by link: {str(e)}")
-            return Response({"error": f"Failed to get check-in: {str(e)}"},
-                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        reservation = serializer.save(property_ref=property)
+        send_checkin_link_email(
+            reservation=reservation,
+            recipient_email=reservation.lead_guest_email,
+            recipient_name=reservation.lead_guest_name
+        )        
+class ReservationDetailAPIView(generics.RetrieveAPIView):
+    queryset = Reservation.objects.all()
+    serializer_class = ReservationSerializer
+    lookup_field = 'reservation_code'
+    permission_classes = [permissions.IsAuthenticated]
 
-class SubmitCheckInAPIView(APIView):
+    def get_object(self):
+        reservation = super().get_object()
+        if not (self.request.user.is_staff or reservation.property_ref.owner == self.request.user):
+            raise PermissionDenied
+        return reservation
+
+
+class CheckInCreateAPIView(generics.CreateAPIView):
+    serializer_class = CheckInSerializer
     permission_classes = []
-    
-    def post(self, request, link_id):
-        try:
-            check_in = get_object_or_404(CheckIn, check_in_link=link_id)
-            
-            if check_in.status in [CheckInStatus.SUBMITTED, CheckInStatus.CONFIRMED]:
-                return Response({"error": "Check-in has already been submitted or confirmed"},
-                              status=status.HTTP_400_BAD_REQUEST)
-            context = {'property_country': check_in.property_ref.country}
-            serializer = CheckInSubmitSerializer(check_in, data=request.data, context=context, partial=True)
-            if serializer.is_valid():
-                check_in = serializer.save()
-                if check_in.property_ref.country == 'ES' and check_in.is_complete:
-                    check_in.status = CheckInStatus.CONFIRMED
-                    check_in.save()
-                    
-                    if check_in.auto_submit_to_police:
-                        service = SESHospedajesService()
-                        print('service: ', service)
-                        service.submit_check_in(check_in)
-                return Response({
-                    "message": "Check-in submitted successfully",
-                    "status": check_in.status,
-                    "redirect_url": f"/property/{check_in.property_ref.id}/landing"  # Redirect to property landing page
-                })
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        except Exception as e:
-            logger.error(f"Error submitting check-in: {str(e)}")
-            return Response({"error": f"Failed to submit check-in: {str(e)}"},
-                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-class GenerateDailyReportAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        if not request.user.is_staff:
-            return Response({"error": "You don't have permission to generate reports"},
-                            status=status.HTTP_403_FORBIDDEN)
-
-        try:
-            tomorrow = timezone.now() + timezone.timedelta(days=1)
-            tomorrow_start = timezone.datetime.combine(tomorrow.date(), timezone.datetime.min.time())
-            tomorrow_end = timezone.datetime.combine(tomorrow.date(), timezone.datetime.max.time())
-            pending_checkins = CheckIn.objects.filter(
-                auto_submit_to_police=True,
-                status=CheckInStatus.CONFIRMED,
-                submission_date__isnull=True,
-                check_in_date__range=(tomorrow_start, tomorrow_end)
-            )
-            service = SESHospedajesService()
-            results = {
-                'total': pending_checkins.count(),
-                'success': 0,
-                'failed': 0,
-                'errors': []
-            }
-            for check_in in pending_checkins:
-                if check_in.is_complete:
-                    result = service.submit_check_in(check_in)
-                    if result.get('success'):
-                        results['success'] += 1
-                    else:
-                        results['failed'] += 1
-                        results['errors'].append({
-                            'check_in_id': str(check_in.id),
-                            'error': result.get('error')
-                        })
-                else:
-                    results['failed'] += 1
-                    results['errors'].append({
-                        'check_in_id': str(check_in.id),
-                        'error': 'Check-in is incomplete'
-                    })
-            return Response(results)
-        except Exception as e:
-            logger.error(f"Error generating daily report: {str(e)}")
-            return Response({"error": f"Failed to generate report: {str(e)}"},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-class MunicipalitySearchAPIView(APIView):
-    def get(self, request):
-        postal_code = request.query_params.get('postal_code', None)
-        name = request.query_params.get('name', None)
+    def create(self, request, *args, **kwargs):
+        reservation = get_object_or_404(
+            Reservation, 
+            check_in_link=self.kwargs['check_in_link']
+        )
         
-        if postal_code:
-            municipalities = Municipality.objects.filter(codigo_postal=postal_code)
-        elif name:
-            municipalities = Municipality.objects.filter(nombre_municipio__icontains=name)
-        else:
-            return Response({"error": "Must provide postal_code or name parameter"},
-                          status=status.HTTP_400_BAD_REQUEST)
-        serializer = MunicipalitySerializer(municipalities, many=True)
-        return Response(serializer.data)
-
-class PublicCheckInView(APIView):
-    permission_classes = []
-
-    def post(self, request, check_in_link):
-        check_in = get_object_or_404(CheckIn, check_in_link=check_in_link)
-        if check_in.status != CheckInStatus.PENDING:
+        if reservation.status != ReservationStatus.CONFIRMED:
             return Response(
-                {"detail": "This check-in has already been processed"},
+                {"error": "Reservation is not confirmed"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        serializer = CheckInCreateSerializer(
-            instance=check_in,
+
+        # ip_address = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', ''))
+        # if ',' in ip_address:
+        #     ip_address = ip_address.split(',')[0].strip()
+        serializer = self.get_serializer(
             data=request.data,
-            partial=True
+            context={
+                'property_country': reservation.property_ref.country,
+                'reservation': reservation,
+                'request': request
+            }
         )
-        if serializer.is_valid():
-            updated_check_in = serializer.save(status=CheckInStatus.CONFIRMED)
-            # Send confirmation email
-            try:
-                send_checkin_confirmation(updated_check_in)
-            except Exception as e:
-                return Response({"error":f"{e}"})
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
+        
+        with transaction.atomic():
+            check_in = serializer.save(
+                reservation=reservation,
+                # ip_address=ip_address,
+                initiated_at=timezone.now(),
+                completed_at=timezone.now(),
+                status='completed'
+            )
+            
+            send_checkin_confirmation(check_in)
+            
+            if reservation.is_auto_submit:
+                try:
+                    scheduled_time = timezone.make_aware(
+                        datetime.combine(
+                            reservation.check_in_date - timedelta(days=1), 
+                            time(hour=21, minute=0)  # 9 previous night
+                        )
+                    )
+                    submit_ses_report.apply_async(
+                        args=[check_in.id],
+                        eta=scheduled_time,
+                    )
+                    logger.info(f"Scheduled police submission for check-in {check_in.id} at {scheduled_time}")
+                except Exception as e:
+                    send_police_submission_notification(check_in, False)
+                
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    # def submit_to_police(self, check_in):
+    #     try:
+    #         service = SESHospedajesService()
+    #         result = service.submit_check_in(check_in)
+            
+    #         PoliceSubmissionLog.objects.create(
+    #             check_in=check_in,
+    #             status=PoliceSubmissionLog.SubmissionStatus.SUBMITTED if result['success'] else PoliceSubmissionLog.SubmissionStatus.FAILED,
+    #             raw_request=result.get('xml_data', ''),
+    #             raw_response=result.get('response', ''),
+    #             error_message=result.get('error', '')
+    #         )
+    #         return result
+    #     except Exception as e:
+    #         logger.error(f"Police submission failed: {str(e)}")
+    #         PoliceSubmissionLog.objects.create(
+    #             check_in=check_in,
+    #             status=PoliceSubmissionLog.SubmissionStatus.FAILED,
+    #             error_message=str(e)
+    #         )
+    #         raise
 
 
-class CheckInListByPropertyView(generics.ListAPIView):
-    """
-    List all check-ins for a specific property
-    """
-    serializer_class = CheckInDetailSerializer
+class PoliceSubmissionRetryAPIView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, submission_id):
+        submission = get_object_or_404(PoliceSubmissionLog, id=submission_id)
+        
+        try:
+            service = SESHospedajesService()
+            result = service.retry_submission(submission)
+            
+            submission.retry_count += 1
+            submission.status = PoliceSubmissionLog.SubmissionStatus.SUBMITTED if result['success'] else PoliceSubmissionLog.SubmissionStatus.FAILED
+            submission.save()
+            
+            return Response({"status": submission.status})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PropertyICalViewSet(viewsets.ModelViewSet):
+    serializer_class = PropertyICalSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        property_id = self.kwargs['property_id']
-        property = get_object_or_404(Property, id=property_id)
+        property = get_object_or_404(Property, id=self.kwargs['property_id'])
         if not (self.request.user.is_staff or property.owner == self.request.user):
-            raise PermissionDenied("You don't have permission to view check-ins for this property")
-        return CheckIn.objects.filter(property=property).order_by('-check_in_date')
+            raise PermissionDenied
+        return PropertyICal.objects.filter(property=property)
+
+    def perform_create(self, serializer):
+        property = get_object_or_404(Property, id=self.kwargs['property_id'])
+        serializer.save(property=property)
+
+
+class DataRetentionPolicyAPIView(generics.RetrieveUpdateAPIView):
+    serializer_class = DataRetentionPolicySerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def get_object(self):
+        property = get_object_or_404(Property, id=self.kwargs['property_id'])
+        return DataRetentionPolicy.objects.get_or_create(property=property)[0]
+
+
+class PublicCheckInAPIView(APIView):
+    permission_classes = []
+
+    def get(self, request, check_in_link):
+        reservation = get_object_or_404(Reservation, check_in_link=check_in_link)
+        check_in = reservation.check_in.first()
+        
+        response_data = {
+            'reservation': ReservationSerializer(reservation).data,
+            'check_in': CheckInSerializer(check_in).data if check_in else None
+        }
+        
+        return Response(response_data)
+
+class ReservationSearchAPIView(APIView):
+    def get(self, request):
+        code = request.query_params.get('code', '')
+        try:
+            reservation = Reservation.objects.get(reservation_code=code.upper())
+            return Response({
+                'found': True,
+                'reservation': ReservationSerializer(reservation).data
+            })
+        except Reservation.DoesNotExist:
+            return Response({'found': False}, status=status.HTTP_404_NOT_FOUND)
+
+
+class DailyPoliceReportAPIView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request):
+        tomorrow = timezone.now() + timezone.timedelta(days=1)
+        reservations = Reservation.objects.filter(
+            check_in_date__date=tomorrow.date(),
+            is_auto_submit=True,
+            status=ReservationStatus.CONFIRMED
+        )
+        results = []
+        service = SESHospedajesService()
+        for reservation in reservations:
+            check_in = reservation.check_in.first()
+            if not check_in:
+                continue
+            try:
+                result = service.submit_check_in(check_in)
+                results.append({
+                    'reservation': reservation.reservation_code,
+                    'success': result['success'],
+                    'error': result.get('error')
+                })
+            except Exception as e:
+                results.append({
+                    'reservation': reservation.reservation_code,
+                    'success': False,
+                    'error': str(e)
+                })
+                
+        return Response({'results': results})
