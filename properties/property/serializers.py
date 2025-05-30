@@ -4,6 +4,7 @@ import random
 import string
 from django.utils.translation import get_language
 from django.conf import settings
+from payment.models import Upsell
 from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField
@@ -16,7 +17,7 @@ from utils.translation_services import translate_text
 logger = logging.getLogger(__name__)
 
 TRANSLATABLE_FIELDS = [
-    "name", "address", "description", "amenities"
+    "name", "address", "description"
 ]
 
 def generate_unique_code(model, length=6):
@@ -31,8 +32,16 @@ class PropertyImageSerializer(serializers.ModelSerializer):
         model = PropertyImage
         fields = ['id', 'image', 'name','uploaded_at']
 
+class UpsellSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Upsell
+        fields = ['id', 'name', 'description', 'price', 'currency', 'charge_type', 'image', 'is_active']
+
 class PropertySerializer(TranslatableModelSerializer):
     code = serializers.CharField(read_only=True)
+    property_reference = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    cif_nif = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    google_maps_link = serializers.URLField(required=False, allow_null=True, allow_blank=True)
     max_guests = serializers.IntegerField(required=True, min_value=1)
     checkin_url = serializers.SerializerMethodField(read_only=True)
 
@@ -48,16 +57,21 @@ class PropertySerializer(TranslatableModelSerializer):
         write_only=True,
         required=False
     )
+    upsell_ids = serializers.ListField(
+        child=serializers.IntegerField(), write_only=True, required=False
+    )
+    upsells = UpsellSerializer(many=True, read_only=True)
 
     class Meta:
         model = Property
         fields = [
-            "id", "name","translations", "address", "price", "owner", "created_at",
+            "id", "name","translations", "address", "owner", "created_at",
             "property_type", "available", "rating", "ses_status",
-            "country", "state", "city", "postal_code",
+            "country", "state", "city", "postal_code", 'upsells',
             "webservice_username", "webservice_password",
-            "establishment_code", "landlord_code",
-            "images", "image", "code", "max_guests", 'checkin_url'
+            "establishment_code", "landlord_code", 'upsell_ids',
+            "images", "image", "code", "max_guests", "checkin_url",
+            "property_reference", "cif_nif", "google_maps_link"
         ]
         read_only_fields = ["id", "owner", "created_at"]
     
@@ -87,10 +101,20 @@ class PropertySerializer(TranslatableModelSerializer):
         translations = validated_data.pop('translations', {})
         images = validated_data.pop('image', {})
         validated_data['code']= generate_unique_code(Property)
+        upsell_ids = validated_data.pop('upsell_ids', [])
         property_instance = Property.objects.create(
             owner=self.context['request'].user,
             **validated_data
         )
+        if isinstance(upsell_ids, str):
+            try:
+                upsell_ids = json.loads(upsell_ids)
+            except json.JSONDecodeError:
+                upsell_ids = []
+        if upsell_ids:
+            upsells = Upsell.objects.filter(id__in=upsell_ids)
+            print('upsells: ', upsells)
+            property_instance.upsells.set(upsells)
         if translations:
             for lang_code, fields in translations.items():
                 property_instance.set_current_language(lang_code)
@@ -128,6 +152,22 @@ class PropertySerializer(TranslatableModelSerializer):
         """
         translations = validated_data.pop('translations', {})
         images = validated_data.pop('image', {})
+        request = self.context.get('request')
+        upsell_ids = validated_data.pop('upsell_ids', None)
+        image_ids_to_keep = request.data.get('image_ids', [])
+        if upsell_ids:
+            upsells = Upsell.objects.filter(id__in=upsell_ids)
+            instance.upsells.set(upsells)
+        else:
+            instance.upsells.clear()
+        if isinstance(image_ids_to_keep, str):
+            try:
+                image_ids_to_keep = json.loads(image_ids_to_keep)
+            except json.JSONDecodeError:
+                image_ids_to_keep = []
+        existing_image_ids = list(instance.images.values_list('id', flat=True))
+        image_ids_to_delete = [img_id for img_id in existing_image_ids if img_id not in image_ids_to_keep]
+        PropertyImage.objects.filter(id__in=image_ids_to_delete, property=instance).delete()
         sensitive_fields = [
         "webservice_username",
         "webservice_password",
@@ -180,10 +220,6 @@ class PropertySerializer(TranslatableModelSerializer):
 
             property_instance.save()
 
-    def split_amenities(amenities_str):
-        if not amenities_str:
-            return []
-        return [item.strip() for item in amenities_str.split(",") if item.strip()]
 
     def to_representation(self, instance):
         """
@@ -201,8 +237,7 @@ class PropertySerializer(TranslatableModelSerializer):
         for lang_code in instance.get_available_languages():
             instance.set_current_language(lang_code)
             translations[lang_code] = {
-            "description": instance.description,
-            "amenities": PropertySerializer.split_amenities(instance.amenities),
+            "description": instance.description
             }
         data["translations"] = translations
         return data

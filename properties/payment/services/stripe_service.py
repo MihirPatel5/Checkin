@@ -152,7 +152,7 @@ class StripeService:
         try:
             account = stripe.Account.create(
                 type='express',
-                coutry='ES',
+                country='ES',
                 email=landlord.email,
                 capabilities={
                     "card_payments": {"requested":True},

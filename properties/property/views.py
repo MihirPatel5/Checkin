@@ -36,17 +36,10 @@ class PropertyListCreateAPIView(APIView):
                 Q(name__icontains=search_query) |
                 Q(address__icontains=search_query) |
                 # Q(translations__description__icontains=search_query) |
-                Q(translations__amenities__icontains=search_query) |
                 Q(property_type__icontains=search_query) |
-                Q(price__icontains=search_query) |
+                Q(property_reference__icontains=search_query) |
                 Q(city__icontains=search_query)
             ).distinct()
-        min_price = request.query_params.get('min_price')
-        max_price = request.query_params.get('max_price')
-        if min_price is not None and min_price.isdigit():
-            queryset = queryset.filter(price__gte=int(min_price))
-        if max_price is not None and max_price.isdigit():
-            queryset = queryset.filter(price__lte=int(max_price))
         property_types_param = request.query_params.get('property_type')
         if property_types_param:
             property_types = [ptype.strip().lower() for ptype in property_types_param.split(',')]

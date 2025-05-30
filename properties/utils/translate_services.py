@@ -1,4 +1,4 @@
-import openai
+import openai, requests
 from django.conf import settings
 from contextlib import contextmanager
 from django.utils import translation
@@ -74,3 +74,60 @@ def generate_translations(source_data: dict, source_lang: str) -> dict:
                 lang_fields[key] = value  # fallback
         translations[lang] = lang_fields
     return translations
+
+
+DEEPL_API_URL = 'https://api.deepl.com/v2/translate'
+
+def translate_text(text, target_lang):
+    """
+    Translate text to the specified target language using DeepL API.
+    
+    Args:
+        text (str): The text to translate.
+        target_lang (str): The target language code (e.g., 'EN', 'FR', 'ES').
+    
+    Returns:
+        str: Translated text, or original text if translation fails.
+    """
+    api_key = getattr(settings, 'DEEPL_API_KEY', None)
+    if not api_key:
+        raise ValueError("DEEPL_API_KEY is not set in settings.")
+
+    if not isinstance(text, str) or not text.strip():
+        return text
+
+    params = {
+        'auth_key': api_key,
+        'text': text,
+        'target_lang': target_lang.upper(),
+    }
+
+    try:
+        response = requests.post(DEEPL_API_URL, data=params)
+        response.raise_for_status()
+        return response.json()['translations'][0]['text']
+    except requests.exceptions.RequestException as e:
+        print(f"Error translating text: {e}")
+        return text
+
+def translate_dict(data, target_lang):
+    """
+    Recursively translate all string values in a dictionary.
+    
+    Args:
+        data: The data structure (dict, list, or primitive) to translate.
+        target_lang (str): The target language code.
+    
+    Returns:
+        The data structure with all strings translated.
+    """
+    if isinstance(data, dict):
+        return {
+            key: translate_dict(value, target_lang)
+            for key, value in data.items()
+        }
+    elif isinstance(data, list):
+        return [translate_dict(item, target_lang) for item in data]
+    elif isinstance(data, str):
+        return translate_text(data, target_lang)
+    return data

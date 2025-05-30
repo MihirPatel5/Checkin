@@ -10,7 +10,7 @@ from payment.models import (
     Transaction,
     StripeConnect,
     Upsell,
-    UpsellPropertyAssigment
+    UpsellPropertyAssignment
 )
 from payment.services.stripe_service import StripeService
 
@@ -224,6 +224,18 @@ class PaymentService:
             }
     
     @staticmethod
+    def create_payment_intent(transaction, payment_method_id=None):
+        """Create a Stripe PaymentIntent for a guest payment."""
+        try:
+            payment_intent = StripeService.create_payment_intent(transaction, payment_method_id)
+            return {
+                'id': payment_intent.id,
+                'client_secret': payment_intent.client_secret
+            }
+        except Exception as e:
+            raise Exception(f"Failed to create payment intent: {str(e)}")
+
+    @staticmethod
     def create_upsell(landlord, name, description, price, property_ids=None):
         """Create a reusable upsell item"""
         upsell = Upsell.objects.create(
@@ -234,7 +246,7 @@ class PaymentService:
         )
         if property_ids:
             for property_id in property_ids:
-                UpsellPropertyAssigment.objects.create(
+                UpsellPropertyAssignment.objects.create(
                     upsell=upsell,
                     property_id=property_id
                 )
@@ -244,21 +256,21 @@ class PaymentService:
     def assign_upsell_to_properties(upsell_id, property_ids):
         """Assign an upsell to multiple properties"""
         upsell = Upsell.objects.get(id=upsell_id)
-        UpsellPropertyAssigment.objects.filter(upsell=upsell).delete()
+        UpsellPropertyAssignment.objects.filter(upsell=upsell).delete()
         assignments = []
         for property_id in property_ids:
-            assignment = UpsellPropertyAssigment(
+            assignment = UpsellPropertyAssignment(
                 upsell=upsell,
                 property_id=property_id
             )
             assignments.append(assignment)
-        UpsellPropertyAssigment.objects.bulk_create(assignments)
+        UpsellPropertyAssignment.objects.bulk_create(assignments)
         return len(assignments)
     
     @staticmethod
     def get_property_upsells(property_id):
         """Get all upsells available for a property"""
-        assignments = UpsellPropertyAssigment.objects.filter(
+        assignments = UpsellPropertyAssignment.objects.filter(
             property_id=property_id,
             upsell__is_active=True
         ).select_related('upsell')
@@ -305,6 +317,65 @@ class PaymentService:
             'transaction_count': transaction_count
         }
     
+    @staticmethod
+    def initiate_guest_payment(reservation, amount, currency='eur', coupon_code=None):
+        """Initiate a guest payment by creating a transaction and PaymentIntent."""
+        try:
+            stripe_connect = reservation.property_ref.owner.stripe_connect if hasattr(reservation.property_ref.owner, 'stripe_connect') else None
+            print('stripe_connect: ', stripe_connect)
+            platform_fee = amount * Decimal('0.01')  # 1% platform fee
+            guest_paid_fee = stripe_connect.guest_pays_fee if stripe_connect else True
+            print('guest_paid_fee: ', guest_paid_fee)
+            total_amount = amount + platform_fee if guest_paid_fee else amount
+            print('total_amount: ', total_amount)
+            landlord_amount = amount - (0 if guest_paid_fee else platform_fee)
+            print('landlord_amount: ', landlord_amount)
+
+            if coupon_code:
+                coupon = Coupon.objects.get(code=coupon_code)
+                if coupon.is_valid:
+                    discount = PaymentService.apply_coupon(total_amount, coupon)
+                    total_amount -= discount
+
+            transaction = Transaction.objects.create(
+                reservation=reservation,
+                # guest=reservation.lead_guest_name,
+                landlord=reservation.property_ref.owner,
+                amount=total_amount,
+                currency=currency,
+                platform_fee=platform_fee,
+                landlord_amount=landlord_amount,
+                guest_paid_fee=guest_paid_fee,
+                status='pending'
+            )
+            print('transaction: ', transaction)
+
+            metadata = {
+                'transaction_id': str(transaction.id),
+                'reservation_id': str(reservation.id),
+                # 'guest_id': str(reservation.guest.id),
+                'landlord_id': str(reservation.property_ref.owner.id)
+            }
+            transfer_data = {'destination': stripe_connect.stripe_account_id} if stripe_connect else None
+            application_fee_amount = int(platform_fee * 100) if stripe_connect and guest_paid_fee else None
+            on_behalf_of = stripe_connect.stripe_account_id if stripe_connect else None
+
+            payment_intent = StripeService.create_payment_intent(
+                amount=int(total_amount * 100),
+                currency=currency,
+                metadata=metadata,
+                transfer_data=transfer_data,
+                application_fee_amount=application_fee_amount,
+                on_behalf_of=on_behalf_of
+            )
+
+            transaction.stripe_payment_id = payment_intent.id
+            transaction.save()
+
+            return {'client_secret': payment_intent.client_secret, 'transaction_id': str(transaction.id)}
+        except Exception as e:
+            return {"error":f"invalid payment data {str(e)}"}
+
     @staticmethod
     def apply_coupon(price, coupon_code):
         """Apply coupon to subscription price"""
