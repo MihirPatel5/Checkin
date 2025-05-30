@@ -1,4 +1,5 @@
 
+import email
 import re
 from django.db import models
 from django.utils.translation import gettext_lazy as _
@@ -32,7 +33,9 @@ class ReservationStatus(models.TextChoices):
 class CheckInStatus(models.TextChoices):
     PENDING = 'pending', _('Pending')
     IN_PROGRESS = 'in_progress', _('In Progress')
+    PAYMENT_PENDING = 'payment_pending', _('Payment Pending')
     COMPLETED = 'completed', _('Completed')
+    FAILED = 'failed', _('Failed')
     EXPIRED = 'expired', _('Expired')
 
 
@@ -67,10 +70,13 @@ class Reservation(models.Model):
     property_ref = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='reservations')
     check_in_date = models.DateTimeField()
     check_out_date = models.DateTimeField()
-    lead_guest_name = models.CharField(null=True, blank=True)
+    lead_guest_name = models.CharField(max_length=255, null=True, blank=True)
     lead_guest_email = models.EmailField(null=True, blank=True)
     lead_guest_phone = models.CharField(max_length=20, null=True, blank=True)
     total_guests = models.PositiveIntegerField(null=True, blank=True)
+    reservation_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text=_("Total amount for the reservation itself"))
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text=_("Amount already paid for the reservation"))
+    is_fully_paid = models.BooleanField(default=False, help_text=_("Is the reservation amount fully paid?"))
     status = models.CharField(max_length=20, choices=ReservationStatus.choices, default=ReservationStatus.CONFIRMED)
     source = models.CharField(max_length=20, choices=[
         ('manual', _('Manual_Creation')),
@@ -90,6 +96,7 @@ class Reservation(models.Model):
         indexes = [
             models.Index(fields=['reservation_code']),
             models.Index(fields=['check_in_date', 'check_out_date']),
+            models.Index(fields=['lead_guest_email'])
         ]
 
     def save(self, *args, **kwargs):
@@ -105,9 +112,16 @@ class Reservation(models.Model):
 
     @property
     def is_active(self):
+        now = timezone.now()
         return self.status == ReservationStatus.CONFIRMED and \
-            self.check_in_date <= timezone.now() <= self.check_out_date
+            self.check_in_date <= now <= self.check_out_date
 
+    @property
+    def outstanding_amount(self):
+        if self.reservation_amount is None:
+            return 0.00
+        return max(0.00, self.reservation_amount - self.amount_paid)
+    
     def __str__(self):
         return f"{self.property_ref.name} - {self.reservation_code}"
 
@@ -131,13 +145,14 @@ class PropertyICal(models.Model):
 class CheckIn(models.Model):
     """Manages guest check-in process for a reservation"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    reservation = models.OneToOneField(Reservation, on_delete=models.CASCADE, related_name='check_in')
+    reservation = models.OneToOneField(Reservation, on_delete=models.CASCADE, related_name='check_in_process')
     status = models.CharField(max_length=20, choices=CheckInStatus.choices, default=CheckInStatus.PENDING)
     initiated_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     digital_signature = models.TextField(null=True, blank=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True)
+    total_amount_charged = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     class Meta:
         ordering = ['-initiated_at']
@@ -146,7 +161,7 @@ class CheckIn(models.Model):
 
     @property
     def is_expired(self):
-        return timezone.now() > self.reservation.check_in_date + timezone.timedelta(hours=24)
+        return timezone.now() > self.reservation.check_out_date and self.status not in [CheckInStatus.COMPLETED]
 
     def save(self, *args, **kwargs):
         if self.is_expired and self.status != CheckInStatus.EXPIRED:
@@ -155,6 +170,20 @@ class CheckIn(models.Model):
 
     def __str__(self):
         return f"Check-In for {self.reservation}"
+
+
+class SelectedUpsell(models.Model):
+    check_in = models.ForeignKey(CheckIn, related_name='selected_upsells', on_delete=models.CASCADE)
+    upsell = models.ForeignKey('payment.Upsell', on_delete=models.CASCADE) 
+    quantity = models.PositiveIntegerField(default=1)
+    price_at_selection = models.DecimalField(max_digits=10, decimal_places=2, help_text=_("Price of the upsell at the time of selection"))
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('check_in', 'upsell')
+
+    def __str__(self):
+        return f"{self.quantity} x {self.upsell.name} for CheckIn {self.check_in.id} at {self.price_at_selection}"
 
 
 class Translation(models.Model):
@@ -183,15 +212,18 @@ class Guest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     check_in = models.ForeignKey(CheckIn, on_delete=models.CASCADE, related_name='guests')
     is_primary = models.BooleanField(default=False)
-    full_name = models.CharField(max_length=255)
-    first_surname = models.CharField(max_length=255)
-    last_surname = models.CharField(max_length=255)
-    second_surname = models.CharField(max_length=255, blank=True, null=True)
+    full_name = models.CharField(max_length=255, help_text=_("Full name of the guest as on document"))
+    first_name = models.CharField(max_length=255, blank=True, help_text=_("First surname, if applicable"))
+    last_name = models.CharField(max_length=255, blank=True, null=True, editable=False)
+    last_name2 = models.CharField(max_length=255, blank=True, null=True, help_text=_("Second surname, if applicable"))
     date_of_birth = models.DateField()
-    nationality = models.CharField(max_length=3)  # ISO 3166-1 alpha-3
+    phone_number = models.CharField(max_length=15, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    street_address = models.CharField(max_length=255, blank=True, null=True)
+    nationality = models.CharField(max_length=2)  # ISO 3166-1 alpha-2
     document_type = models.CharField(max_length=20, choices=IdentityDocumentType.choices)
     document_number = models.CharField(max_length=50)
-    country_of_residence = models.CharField(max_length=3)  # ISO 3166-1 Alpha-3    
+    country_of_residence = models.CharField(max_length=2)  # ISO 3166-1 Alpha-2
     support_number = models.CharField(max_length=50, blank=True, null=True)
     municipality = models.ForeignKey(
         'Municipality', 
@@ -199,7 +231,7 @@ class Guest(models.Model):
         null=True, 
         blank=True
     )
-    is_lead = models.BooleanField(default=False)
+    is_lead = models.BooleanField(default=False, help_text=_("Is this the lead guest for the check-in?"))
     id_photo = models.ImageField(
         upload_to='guest_ids/',
         null=True,
@@ -242,20 +274,26 @@ class Guest(models.Model):
 
     def anonymize(self):
         if not self.anonymized:
-            self.first_surname = f"ANON-{uuid.uuid4().hex[:6]}"
-            self.last_surname = ""
+            self.full_name = f"ANON GUEST {uuid.uuid4().hex[:8]}"
+            self.first_name = f"ANON-{uuid.uuid4().hex[:6]}"
+            self.last_name = ""
+            self.last_name2 = ""
+            self.document_number = "ANON" + self.document_number[-4:] if self.document_number else "ANON0000"
+            # ... anonymize other fields for future use...
             self.anonymized = True
             self.save()
 
     class Meta:
-        ordering = ['-is_primary', 'last_surname', 'first_surname']
+        ordering = ['-is_lead', 'created_at','last_name', 'first_name']
 
     @property
-    def full_name(self):
-        return f"{self.first_surname} {self.last_surname}"
+    def display_name(self):
+        return f"{self.first_name} {self.last_name}"
 
     @property
     def age(self):
+        if not self.date_of_birth:
+            return None
         today = timezone.now().date()
         return today.year - self.date_of_birth.year - (
             (today.month, today.day) < 
@@ -264,10 +302,11 @@ class Guest(models.Model):
 
     @property
     def is_minor(self):
-        return self.age < 18
+        age = self.age
+        return age is not None and age < 18
 
     def __str__(self):
-        return f"{self.full_name} ({self.nationality})"
+        return f"{self.display_name} ({self.nationality})"
 
 
 class GuardianRelationship(models.Model):
@@ -283,7 +322,7 @@ class GuardianRelationship(models.Model):
         verbose_name = _('Guardian Relationship')
 
     def __str__(self):
-        return f"{self.guardian} → {self.minor} ({self.relationship_type})"
+        return f"{self.guardian.full_name} → {self.minor.full_name} ({self.relationship_type})"
 
 
 class GuestbookEntry(models.Model):
@@ -303,21 +342,23 @@ class GuestbookEntry(models.Model):
 class PoliceSubmissionLog(models.Model):
     """Model to tracke police submission logs"""
     check_in = models.ForeignKey(CheckIn, on_delete=models.CASCADE, related_name="police_submissions")
-    submitted_at = models.DateTimeField(auto_now=True)
-    success = models.BooleanField()
-    raw_request = models.TextField()
-    raw_response = models.TextField()
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    success = models.BooleanField(default=False)
+    raw_request = models.TextField(blank=True)
+    raw_response = models.TextField(blank=True)
     error_message = models.TextField(blank=True)
-    xml_version = models.CharField(max_length=10)
-    validation_errors = models.JSONField(default=list)
+    xml_version = models.CharField(max_length=10, blank=True)
+    validation_errors = models.JSONField(default=list, blank=True)
     retry_count = models.PositiveIntegerField(default=0)
-    next_retry = models.DateTimeField(null=True)
+    next_retry = models.DateTimeField(null=True, blank=True)
     
     class SubmissionStatus(models.TextChoices):
         PENDING = 'pending', _('Pending')
         VALIDATED = 'validated', _('Validated')
         SUBMITTED = 'submitted', _('Submitted')
+        ACKNOWLEDGED = 'acknowledged', _('Acknowledged')
         FAILED = 'failed', _('Failed')
+        RETRYING = 'retrying', _('Retrying')
     
     status = models.CharField(
         max_length=20,
@@ -347,25 +388,31 @@ class SpanishDocumentValidator:
 
 
 class DataRetentionPolicy(models.Model):
-    property = models.ForeignKey(Property, on_delete=models.CASCADE)
+    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="data_retention_policy")
     retention_period = models.PositiveIntegerField(
         default=1095,  # 3 years in days
         help_text=_("Data retention period in days")
     )
     auto_anonymize = models.BooleanField(default=True)
-    last_cleanup = models.DateTimeField(null=True)
+    last_cleanup = models.DateTimeField(null=True, blank=True)
     
     @classmethod
     def enforce_retention_policies(cls):
-        for policy in cls.objects.all():
-            cutoff_date = timezone.now() - timezone.timedelta(days=policy.retention_period)
-            guests = Guest.objects.filter(
-                check_in__reservation__property=policy.property,
-                created_at__lte=cutoff_date
-            )
+        for policy in cls.objects.filter(auto_anonymize=True):
+            cutoff_date = timezone.now().date() - timezone.timedelta(days=policy.retention_period)
+            reservations_to_process = Reservation.objects.filter(
+                property_ref=policy.property,
+                check_out_date__date__lte=cutoff_date,
+                check_in_process__guests__anonymized=False
+            ).distinct()
+
+            for reservation in reservations_to_process:
+                if hasattr(reservation, 'check_in_process'):
+                    for guest in reservation.check_in_process.guests.filter(anonymized=False):
+                        guest.anonymize()
             
-            for guest in guests:
-                if policy.auto_anonymize:
-                    guest.anonymize()
-                else:
-                    guest.delete()
+            policy.last_cleanup = timezone.now()
+            policy.save()
+    
+    def __str__(self):
+        return f"Data Retention Policy for {self.property.name}"

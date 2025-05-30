@@ -11,15 +11,15 @@
     <p>Hello,</p>
     {% endif %}
     
-    <p>Please complete the check-in form for your upcoming stay at {{ property.name }}:</p>
+    <p>Please complete the check-in form for your upcoming stay at {{ property.name }}: Search with reservation code: {{ reservation.reservation_code }} for Check-in</p>
     
     <p>
-        <a href="{{ FRONTEND_URL }}/guest-checkin/{{ reservation.check_in_link }}/" 
+        <a href="{{ FRONTEND_URL }}/guest-checkin" 
            style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
             Complete Check-in Form
         </a>
     
-    <p>This link is unique to your reservation. Please complete the form before your arrival.</p>
+    <p>This link is unique to your reservation and your check-in code is {{ reservation.check_in_link }}. Please complete the form before your arrival.</p>
     
     <p>Best regards,<br>
     {{ property.owner.get_full_name|default:property.owner.username }}</p>

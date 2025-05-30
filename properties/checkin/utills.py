@@ -77,9 +77,9 @@ class SESHospedajesService:
             ET.SubElement(persona, "rol").text = "VI" if guest.is_lead else "VG"
             
             # Name components
-            ET.SubElement(persona, "nombre").text = guest.first_surname
-            ET.SubElement(persona, "apellido1").text = guest.last_surname
-            ET.SubElement(persona, "apellido2").text = guest.second_surname or ""
+            ET.SubElement(persona, "nombre").text = guest.first_name
+            ET.SubElement(persona, "apellido1").text = guest.last_name
+            ET.SubElement(persona, "apellido2").text = guest.last_name2 or ""
             
             # Document information
             doc_type = self._map_document_type(guest.document_type)

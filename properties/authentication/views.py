@@ -120,6 +120,8 @@ class LoginView(APIView):
     Handle User Login and authentication using email/password and
     return access token and refresh token after success.
     """
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
     def post(self, request):
         try:
