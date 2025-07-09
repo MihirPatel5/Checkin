@@ -5,3 +5,7 @@ properties/__pycache__
 utils/__pycache__
 property/migrations/__pycache__
 property/__pycache__
+payment/__pycache__
+payment/migrations/__pycache__
+checkin/__pycache__
+checkin/migrations/__pycache__

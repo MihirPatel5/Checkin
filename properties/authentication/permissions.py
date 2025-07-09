@@ -33,3 +33,10 @@ class CanEditUser(permissions.BasePermission):
 
 class CanDeleteUser(CanEditUser):
     pass
+
+class IsSuperOrAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return (
+            request.user.is_authenticated and 
+            request.user.role in ["SuperAdmin", "Admin"]
+        )

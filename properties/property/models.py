@@ -15,8 +15,7 @@ class Property(TranslatableModel):
                 ("hostel", "Hostal"),
             ]
     translations = TranslatedFields(
-        description=models.TextField(verbose_name="Description"),
-        amenities=models.TextField(verbose_name="Amenities"),
+        description=models.TextField(verbose_name="Description")
     )
     property_type = models.CharField(
         max_length=100,
@@ -25,7 +24,8 @@ class Property(TranslatableModel):
         default="apartment"
     )
     name = models.CharField(max_length=255, verbose_name="Property Name",null=True, blank=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Price")
+    property_reference = models.CharField(max_length=100, verbose_name="Property Reference", null=True, blank=True)
+    cif_nif = models.CharField(max_length=50, verbose_name="CIF/NIF", null=True, blank=True)
     owner = models.ForeignKey(
         "authentication.user", on_delete=models.CASCADE, related_name="property_owner"
     )
@@ -34,7 +34,12 @@ class Property(TranslatableModel):
     city = models.CharField(verbose_name="City", null=True, blank=True)
     postal_code = models.CharField(max_length=20, verbose_name="Postal Code", null=True,  blank=True)
     address = models.TextField(verbose_name="Address", null=True, blank=True)
+    google_maps_link = models.URLField(verbose_name="Google Maps Link", null=True, blank=True)
     created_at = models.DateTimeField(auto_now=True)
+    code = models.CharField(null=True, blank=True)
+    upsells = models.ManyToManyField('payment.Upsell', blank=True, related_name='properties')
+    max_guests = models.IntegerField(default=1, null=True, blank=True)
+    
     available = models.BooleanField(default=True, verbose_name="Availability")
     rating = models.DecimalField(
         max_digits=3, decimal_places=2, default=0.0, verbose_name="Rating"
@@ -92,5 +97,5 @@ class IsLanlordOrAdmin(permissions.BasePermission):
     
 
 class IsSuperAdmin(permissions.BasePermission):
-    def has_permission(self, request, view):    
+    def has_permission(self, request, view):
         return request.user.role == "SuperAdmin"

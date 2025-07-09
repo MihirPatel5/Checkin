@@ -46,6 +46,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             "last_name",
             # "language",
             "phone_number",
+            "role",
         ]
 
     def validate(self, attrs):
@@ -62,6 +63,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             user.first_name = validated_data.get("first_name", "")
             user.last_name = validated_data.get("last_name", "")
             user.save()
+        self.send_verification_email(user)
         return user
 
     def send_verification_email(self, user):
@@ -70,17 +72,15 @@ class RegisterSerializer(serializers.ModelSerializer):
         activation_link = f"{settings.FRONTEND_URL}/verify-email/{uid}/{token}/"
         subject = _("Verify your email address")
         body = _(f"Hi {user.first_name}, please verify your email by clicking the link below:\n{activation_link}")
-        Email.send_email(
-            subject=subject,
-            message=body,   
-            recipient_list=[user.email]
-        )
+        email = Email(subject=subject)
+        email.to(user.email)
+        email.add_text(body)
+        email.send()
 
 
 class AgentCreateSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(write_only=True)
     last_name = serializers.CharField(write_only=True)
-
     class Meta:
         model = User
         fields = ["email", "first_name", "last_name", "phone_number"]
@@ -197,7 +197,6 @@ class PasswordResetSerializer(serializers.Serializer):
         return data
 
 class AdminRegisterUserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(required=True)
     last_name = serializers.CharField(required=True)
     # language = serializers.CharField(write_only=True, required=False, default="en")
@@ -234,7 +233,7 @@ class AdminRegisterUserSerializer(serializers.ModelSerializer):
         role = validated_data.get("role", "Guest")
         phone_number = validated_data.pop("phone_number")
 
-        user = User.objects.create(
+        user = User.objects.create_user(
             email=validated_data["email"],
             username=validated_data["email"].split("@")[0],
             role=role,
