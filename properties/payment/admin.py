@@ -9,20 +9,20 @@ from .models import (
     StripeConnect,
     Transaction,
     Upsell,
-    UpsellPropertyAssigment,
+    UpsellPropertyAssignment,
 )
 
 admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ('property_type', 'billing_cycle', 'price_per_unit', 'is_active')
-    list_filter = ('property_type', 'billing_cycle', 'is_active')
-    search_fields = ('property_type', 'billing_cycle')
+    list_display = ('billing_cycle', 'price_per_unit', 'is_active')
+    list_filter = ('billing_cycle', 'is_active')
+    search_fields = ('billing_cycle')
     list_editable = ('price_per_unit', 'is_active')
 
 @admin.register(LandlordSubscription)
 class LandlordSubscriptionAdmin(admin.ModelAdmin):
-    list_display = ('landlord', 'subscription_plan', 'unit_count', 'status', 'start_date', 'end_date', 'trail_end_date')
-    list_filter = ('status', 'subscription_plan__property_type', 'subscription_plan__billing_cycle')
+    list_display = ('landlord', 'unit_count', 'status', 'start_date', 'end_date', 'trial_end_date')
+    list_filter = ('status',)
     search_fields = ('landlord__username', 'landlord__email', 'stripe_subscription_id')
     raw_id_fields = ('landlord',)
     date_hierarchy = 'start_date'
@@ -67,11 +67,15 @@ class StripeConnectAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'guest', 'landlord', 'reservation', 'transaction_type', 'amount', 'platform_fee', 'status', 'created_at')
-    list_filter = ('transaction_type', 'status', 'created_at', 'guest_paid_fee')
+    list_display = ('id', 'get_guest', 'landlord', 'reservation', 'transaction_type', 'amount', 'platform_fee', 'status', 'created_at')
+    list_filter = ('transaction_type', 'status', 'created_at', 'guest_paid_platform_fee')
     search_fields = ('guest_username', 'guest_email', 'landlord_email', 'stripe_payment_id')
-    raw_id_fields =  ('reservation', 'guest', 'landlord')
-    readonly_fields = ('platform_fee', 'stripe_fee', 'landlord_amount')
+    raw_id_fields =  ('reservation', 'guest_user', 'landlord')
+    readonly_fields = ('platform_fee', 'stripe_processing_fee', 'landlord_amount')
+
+    def get_guest(self, obj):
+        return obj.guest_user.username if obj.guest_user else obj.guest_email
+    get_guest.short_description = 'Guest'
 
     def get_queryset(self, request):
         qs = super.get_queryset(request)
@@ -92,7 +96,7 @@ class UpsellAdmin(admin.ModelAdmin):
     raw_id_fields = ('landlord',)
 
     def property_count(self, obj):
-        return UpsellPropertyAssigment.objects.filter(upsell=obj).count()
+        return UpsellPropertyAssignment.objects.filter(upsell=obj).count()
     property_count.short_description = 'properties'
 
     def get_queryset(self, request):
@@ -101,7 +105,7 @@ class UpsellAdmin(admin.ModelAdmin):
             return qs
         return qs.filter(landlord=request.user)
 
-@admin.register(UpsellPropertyAssigment)
+@admin.register(UpsellPropertyAssignment)
 class UpsellPropertyAssignmentAdmin(admin.ModelAdmin):
     list_display = ('upsell', 'property_ref')
     list_filter = ('upsell', 'property_ref')

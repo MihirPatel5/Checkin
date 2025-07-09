@@ -10,7 +10,7 @@ from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField
 from parler.utils.context import switch_language
 
-from .models import Property, PropertyImage
+from .models import Property, PropertyImage, Activity
 from utils.ses_validation import generate_ses_xml, send_validation_request
 from utils.translation_services import translate_text
 
@@ -36,6 +36,12 @@ class UpsellSerializer(serializers.ModelSerializer):
     class Meta:
         model = Upsell
         fields = ['id', 'name', 'description', 'price', 'currency', 'charge_type', 'image', 'is_active']
+        
+class ActivitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Activity
+        fields = ["id", "title", "description"]
+        read_only_fields = ["id"]
 
 class PropertySerializer(TranslatableModelSerializer):
     code = serializers.CharField(read_only=True)
@@ -50,7 +56,8 @@ class PropertySerializer(TranslatableModelSerializer):
     webservice_password = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     establishment_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     landlord_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    
+    wifi_name = serializers.CharField(required=False, allow_blank=False)
+    wifi_pass = serializers.CharField(required=False, allow_blank=True)
     images = PropertyImageSerializer(many=True, read_only=True)
     image = serializers.ListField(
         child=serializers.ImageField(max_length=1000000, allow_empty_file=False, use_url=False),
@@ -61,6 +68,15 @@ class PropertySerializer(TranslatableModelSerializer):
         child=serializers.IntegerField(), write_only=True, required=False
     )
     upsells = UpsellSerializer(many=True, read_only=True)
+    activities = ActivitySerializer(many=True, read_only=True)
+    activities_data = serializers.ListField(
+        child=serializers.DictField(
+            child=serializers.CharField()
+        ),
+        required=False,
+        write_only=True,
+        help_text="JSON string representing list of activity objects. Example: [{'title': 'Hiking', 'description': 'Mountain trail'}]"
+    )
 
     class Meta:
         model = Property
@@ -71,13 +87,15 @@ class PropertySerializer(TranslatableModelSerializer):
             "webservice_username", "webservice_password",
             "establishment_code", "landlord_code", 'upsell_ids',
             "images", "image", "code", "max_guests", "checkin_url",
-            "property_reference", "cif_nif", "google_maps_link"
+            "property_reference", "cif_nif", "google_maps_link",
+            "wifi_name", "wifi_pass", "activities", "activities_data",
         ]
         read_only_fields = ["id", "owner", "created_at"]
+        extra_kwargs = {"activities_data": {"write_only": True}}
     
     def to_internal_value(self, data):
         """
-        Handle translations in various formats including string dictionary and form data
+        Handle activities_data in various formats
         """
         data_copy = data.copy()
         if 'translations' in data_copy and isinstance(data_copy['translations'], str):
@@ -88,7 +106,24 @@ class PropertySerializer(TranslatableModelSerializer):
                     data_copy['translations'] = json.loads(translations_value)
             except json.JSONDecodeError:
                 pass
-                
+        if 'activities_data' in data_copy:
+            if isinstance(data_copy['activities_data'], str):
+                try:
+                    data_copy['activities_data'] = json.loads(data_copy['activities_data'])
+                except json.JSONDecodeError:
+                    data_copy['activities_data'] = []
+            elif isinstance(data_copy['activities_data'], list):
+                pass
+            elif isinstance(data_copy['activities_data'], dict):
+                activities_list = []
+                try:
+                    for index in sorted([int(k) for k in data_copy['activities_data'].keys() if k.isdigit()]):
+                        activity_data = data_copy['activities_data'][str(index)]
+                        if isinstance(activity_data, dict):
+                            activities_list.append(activity_data)
+                    data_copy['activities_data'] = activities_list
+                except (ValueError, KeyError):
+                    data_copy['activities_data'] = []
         return super().to_internal_value(data_copy)
     
     def get_checkin_url(self, obj):
@@ -98,6 +133,7 @@ class PropertySerializer(TranslatableModelSerializer):
         """
         Create a new property with translations
         """
+        activities_data = validated_data.pop("activities_data", [])
         translations = validated_data.pop('translations', {})
         images = validated_data.pop('image', {})
         validated_data['code']= generate_unique_code(Property)
@@ -113,7 +149,6 @@ class PropertySerializer(TranslatableModelSerializer):
                 upsell_ids = []
         if upsell_ids:
             upsells = Upsell.objects.filter(id__in=upsell_ids)
-            print('upsells: ', upsells)
             property_instance.upsells.set(upsells)
         if translations:
             for lang_code, fields in translations.items():
@@ -121,6 +156,14 @@ class PropertySerializer(TranslatableModelSerializer):
                 for field_name, value in fields.items():
                     setattr(property_instance, field_name, value)
                 property_instance.save()
+        if activities_data and isinstance(activities_data, list):
+            for activity in activities_data:
+                if isinstance(activity, dict) and 'title' in activity:
+                    Activity.objects.create(
+                        property=property_instance,
+                        title=activity.get('title', ''),
+                        description=activity.get('description', '')
+                    )
         for img in images:
             filename = os.path.splitext(img.name)[0]
             PropertyImage.objects.create(property=property_instance, image=img, name=filename)
@@ -133,7 +176,7 @@ class PropertySerializer(TranslatableModelSerializer):
         
         if all([ws_user, ws_password, est_code, landlord_code]):
             try:
-                xml_data = generate_ses_xml(est_code)
+                xml_data = generate_ses_xml(property_instance)
                 success, ses_response = send_validation_request(xml_data, ws_user, ws_password, landlord_code)
                 property_instance.ses_status = success
                 if not success:
@@ -150,16 +193,21 @@ class PropertySerializer(TranslatableModelSerializer):
         """
         Update a property with translations
         """
+        activities_data = validated_data.pop("activities_data", None)
         translations = validated_data.pop('translations', {})
-        images = validated_data.pop('image', {})
+        images = validated_data.pop('image', [])
         request = self.context.get('request')
         upsell_ids = validated_data.pop('upsell_ids', None)
-        image_ids_to_keep = request.data.get('image_ids', [])
-        if upsell_ids:
+        image_ids_to_keep = request.data.get('image_ids', []) if request else []
+        if upsell_ids is not None:
+            if isinstance(upsell_ids, str):
+                try:
+                    upsell_ids = json.loads(upsell_ids)
+                except json.JSONDecodeError:
+                    upsell_ids = []
             upsells = Upsell.objects.filter(id__in=upsell_ids)
             instance.upsells.set(upsells)
-        else:
-            instance.upsells.clear()
+        
         if isinstance(image_ids_to_keep, str):
             try:
                 image_ids_to_keep = json.loads(image_ids_to_keep)
@@ -169,11 +217,11 @@ class PropertySerializer(TranslatableModelSerializer):
         image_ids_to_delete = [img_id for img_id in existing_image_ids if img_id not in image_ids_to_keep]
         PropertyImage.objects.filter(id__in=image_ids_to_delete, property=instance).delete()
         sensitive_fields = [
-        "webservice_username",
-        "webservice_password",
-        "establishment_code",
-        "landlord_code"
-    ]
+            "webservice_username",
+            "webservice_password",
+            "establishment_code",
+            "landlord_code"
+        ]
         for field in sensitive_fields:
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
@@ -187,10 +235,21 @@ class PropertySerializer(TranslatableModelSerializer):
                     setattr(instance, field_name, value)
                 
         instance.save()
+        if activities_data is not None:
+            instance.activities.all().delete()
+            for act in activities_data:
+                if isinstance(act, dict) and 'title' in act:
+                    Activity.objects.create(
+                        property=instance,
+                        title=act.get('title', ''),
+                        description=act.get('description', '')
+                    )
         for img in images:
-            filename_without_ext = os.path.splitext(img.name)[0]
+            filename = os.path.splitext(img.name)[0]
             PropertyImage.objects.create(
-                property=instance, image=img, name=filename_without_ext
+                property=instance, 
+                image=img, 
+                name=filename
             )
         self._validate_ses(instance, validated_data)
 

@@ -44,6 +44,16 @@ class Property(TranslatableModel):
     rating = models.DecimalField(
         max_digits=3, decimal_places=2, default=0.0, verbose_name="Rating"
     )
+    enable_identity_confirmation = models.BooleanField(
+        default=False,
+        help_text="Enable docTR-powered identity confirmation for €3/month"
+    )
+    guest_pays_platform_fee = models.BooleanField(
+        default=False,
+        help_text="If True, guest pays the platform commission fee; else landlord pays"
+    )
+    wifi_name = models.CharField(max_length=100, blank=True, null=True)
+    wifi_pass = models.CharField(max_length=100, blank=True, null=True)
     webservice_username = models.CharField(max_length=255, null=True, blank=True, verbose_name="SES Username")
     webservice_password = models.CharField(max_length=255, null=True, blank=True, verbose_name="SES Password")
     establishment_code = models.CharField(max_length=255, null=True, blank=True, verbose_name="Establishment Code")
@@ -52,6 +62,10 @@ class Property(TranslatableModel):
 
     def __str__(self):
         return self.name if self.name else "Unnamed Property"
+
+    @property
+    def is_spanish(self):
+        return self.country and self.country.upper() == "ES"
 
     def validate_ses_credentials(self):
         """Validate SES credentials and update status"""
@@ -79,6 +93,22 @@ class Property(TranslatableModel):
         else:
             self.ses_status = False
             raise ValueError("Missing SES credentials")
+
+
+class Activity(models.Model):
+    """
+    A recommended activity for a given Property.
+    """
+    property = models.ForeignKey(
+        Property,
+        on_delete=models.CASCADE,
+        related_name="activities"
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField()
+
+    def __str__(self):
+        return f"{self.property.name} - {self.title}"
 
 
 class PropertyImage(models.Model):

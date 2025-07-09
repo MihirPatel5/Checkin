@@ -112,6 +112,8 @@ class User(AbstractBaseUser, PermissionsMixin, TranslatableModel):
 
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="Guest")
     created_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_users")
+    stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
+    stripe_account_id  = models.CharField(max_length=100, blank=True, null=True)
     objects = UserManager()
 
     USERNAME_FIELD = "email"
