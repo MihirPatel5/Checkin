@@ -1,8 +1,9 @@
+from decimal import Decimal
 from django.db import models
 from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
-from checkin.models import Reservation, CheckIn
+from checkin.models import Reservation, CheckIn, Guest
 
 PROPERTY_TYPE_CHOICES = [
         ('full_property', 'Full Property'),
@@ -17,49 +18,29 @@ BILLING_CYCLE_CHOICES = [
 
 class SubscriptionPlan(models.Model):
     """Base subscription plan configuration"""
-    property_type = models.CharField(max_length=20, choices=PROPERTY_TYPE_CHOICES)
+    # property_type = models.CharField(max_length=20, choices=PROPERTY_TYPE_CHOICES)
     billing_cycle = models.CharField(max_length=10, choices=BILLING_CYCLE_CHOICES)
-    price_per_unit = models.DecimalField(max_digits=6, decimal_places=2)
-    min_units = models.IntegerField(default=1)
+    full_property = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    room = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    bed = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    custom_branding = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    smart_lock_full_property = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    smart_lock_room = models.DecimalField(max_digits=10, null=True, blank=True, decimal_places=2)
+    commission_rate = models.DecimalField(max_digits=10, blank=True, null=True, decimal_places=2)
+    min_units_full_property = models.IntegerField(default=1)
+    min_units_room = models.IntegerField(default=5)
+    min_units_bed = models.IntegerField(default=5)
+    currency_type = models.CharField(max_length=3, null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    discount_tiers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="e.g. [{\"minProperties\":10,\"discount\":0.05,\"label\":\"5% off\"}, …]"
+    )
+    stripe_price_id = models.CharField(max_length=100, blank=True, null=True)
 
     def __str__(self):
-        return f"{self.get_property_type_display()} - {self.get_billing_cycle_display()} - €{self.price_per_unit}/unit"
-
-
-class LandlordSubscription(models.Model):
-    """Tracks the subscription for each landlord"""
-    STATUS_CHOICE = [
-        ('active', 'Active'),
-        ('past_due', 'Past Due'),
-        ('canceled', 'Canceled'),
-        ('trialing', 'Trailing'),
-        ('suspended', 'Suspended')
-    ]
-    landlord = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    subscription_plan = models.ForeignKey(SubscriptionPlan, on_delete=models.CASCADE)
-    unit_count = models.PositiveIntegerField(default=1)
-    stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)
-    status = models.CharField(choices=STATUS_CHOICE, default='trialing')
-    start_date = models.DateTimeField(default=timezone.now)
-    end_date = models.DateTimeField(null=True, blank=True)
-    trial_end_date = models.DateTimeField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        if not self.pk and self.status == 'trialing' and not self.trial_end_date:
-            self.trial_end_date = timezone.now() + timedelta(days=15)
-        super().save(*args, **kwargs)
-    
-    def __str__(self):
-        return f"{self.landlord.username} - {self.subscription_plan} - {self.status}"
-    
-    @property
-    def is_active(self):
-        return self.status in ['active', 'trialing']
-    
-    @property
-    def total_price(self):
-        return self.subscription_plan.price_per_unit * self.unit_count
+        return f"- €{self.billing_cycle}"
 
 
 class Coupon(models.Model):
@@ -76,6 +57,7 @@ class Coupon(models.Model):
     max_uses = models.PositiveIntegerField(null=True,blank=True)
     current_uses = models.PositiveIntegerField(default=0)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    stripe_coupon_id = models.CharField(max_length=100, blank=True, null=True) # if needed in stripe 
 
     def __str__(self):
         return f"{self.code} - {self.discount_type} - {self.discount_value}"
@@ -86,6 +68,63 @@ class Coupon(models.Model):
         max_uses_valid =self.max_uses is None or self.current_uses < self.max_uses
         date_valid = now >= self.valid_from and (self.valid_until is None or now <= self.valid_until)
         return max_uses_valid and date_valid
+
+
+class LandlordSubscription(models.Model):
+    """Tracks the subscription for each landlord"""
+    STATUS_CHOICE = [
+        ('active', 'Active'),
+        ('past_due', 'Past Due'),
+        ('canceled', 'Canceled'),
+        ('trialing', 'Trialing'),  # Fixed typo from 'Trailing' to 'Trialing'
+        ('suspended', 'Suspended')
+    ]
+    landlord = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    coupon = models.ForeignKey(Coupon, on_delete=models.SET_NULL, null=True, blank=True)
+    unit_count = models.PositiveBigIntegerField(default=1) # remove on finalize
+    full_property_count = models.PositiveIntegerField(default=0)
+    room_count = models.PositiveIntegerField(default=0)
+    bed_count = models.PositiveIntegerField(default=0)
+    custom_branding_full_property_count = models.PositiveIntegerField(default=0)
+    custom_branding_room_count = models.PositiveIntegerField(default=0)
+    custom_branding_bed_count = models.PositiveIntegerField(default=0)
+    smart_lock_full_property_count = models.PositiveIntegerField(default=0)
+    smart_lock_room_count = models.PositiveIntegerField(default=0)
+    smart_lock_bed_count = models.PositiveIntegerField(default=0)
+    billing_cycle = models.CharField(choices=BILLING_CYCLE_CHOICES, default='monthly', null=True, blank=True)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    subscription_details = models.JSONField(default=dict, blank=True)
+    stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)
+    stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICE, default='trialing')
+    start_date = models.DateTimeField(default=timezone.now)
+    end_date = models.DateTimeField(null=True, blank=True)
+    trial_end_date = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.pk and self.status == 'trialing' and not self.trial_end_date:
+            self.trial_end_date = timezone.now() + timedelta(days=15)
+
+        if not self.end_date and self.start_date and self.billing_cycle:
+            if self.billing_cycle == 'monthly':
+                self.end_date = self.start_date + timedelta(days=30)
+            elif self.billing_cycle == 'yearly':
+                self.end_date = self.start_date + timedelta(days=365)
+        super().save(*args, **kwargs)
+    
+    def __str__(self):
+        return f"{self.landlord.username} - {self.status} ({self.billing_cycle})"
+    
+    @property
+    def is_active(self):
+        return self.status in ['active', 'trialing']
+
+    @property
+    def is_expired(self):
+        """Check if subscription has expired"""
+        if self.end_date:
+            return timezone.now() > self.end_date
+        return False
 
 
 class SubscriptionInvoice(models.Model):
@@ -99,6 +138,8 @@ class SubscriptionInvoice(models.Model):
     stripe_invoice_id = models.CharField(max_length=100, blank=True, null=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    pdf_url = models.URLField(blank=True, null=True)
+    hosted_invoice_url = models.URLField(blank=True, null=True)
     coupon = models.ForeignKey(Coupon, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     paid_at = models.DateTimeField(null=True, blank=True)
@@ -121,7 +162,7 @@ class StripeConnect(models.Model):
 
 class Transaction(models.Model):
     """Records all payments made by guests during check-in or for other services"""
-    TRANSACTION_TYPE_CHOICES =[
+    TRANSACTION_TYPE_CHOICES = [
         ('reservation_payment', 'Reservation Payment'),
         ('addon_payment', 'Add-on Payment'),
         ('security_deposit', 'Security Deposit'),
@@ -138,7 +179,7 @@ class Transaction(models.Model):
     reservation = models.ForeignKey("checkin.Reservation", on_delete=models.SET_NULL, null=True, blank=True, related_name="payment_transactions")
     check_in = models.ForeignKey("checkin.CheckIn", on_delete=models.SET_NULL, null=True, blank=True, related_name="payment_transactions")
     guest_email = models.EmailField(null=True, blank=True, help_text="Email of the guest making the payment")
-    guest_user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="guest_payment_transactions")
+    guest_user = models.ForeignKey(Guest, on_delete=models.SET_NULL, null=True, blank=True, related_name="guest_payment_transactions")
     landlord = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="landlord_received_transactions")
     transaction_type = models.CharField(max_length=30, choices=TRANSACTION_TYPE_CHOICES)
     description = models.CharField(max_length=255, blank=True, help_text="Brief description of the transaction, e.g., 'Parking Fee'")
@@ -152,7 +193,6 @@ class Transaction(models.Model):
     stripe_charge_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     error_message = models.TextField(blank=True, null=True, help_text="Error message if transaction failed")
-
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
@@ -163,8 +203,15 @@ class Transaction(models.Model):
         return f"Txn for {self.reservation.reservation_code if self.reservation else 'N/A'} by {guest_identifier} - {self.amount} {self.currency} - {self.get_status_display()}"
 
     def save(self, *args, **kwargs):
-        if self.landlord_amount is None or self.landlord_amount == 0.00: # Check for explicit set to 0 too
-             self.landlord_amount = self.amount - self.platform_fee - self.stripe_processing_fee
+        if not self.pk and self.status == 'trialing' and not self.trial_end_date:
+            self.trial_end_date = timezone.now() + timedelta(days=15)
+        if self.status in ['active', 'trialing'] and not self.end_date:
+            if self.billing_cycle == 'monthly':
+                self.end_date = self.start_date + timedelta(days=30)
+            elif self.billing_cycle == 'yearly':
+                self.end_date = self.start_date + timedelta(days=365)
+        if self.status == 'canceled' and not self.end_date:
+            self.end_date = timezone.now()
         super().save(*args, **kwargs)
 
 
@@ -187,7 +234,7 @@ class Upsell(models.Model):
 
 class UpsellPropertyAssignment(models.Model):
     """Links upsells to specific properties, making them available for those properties"""
-    upsell =  models.ForeignKey(Upsell, on_delete=models.CASCADE, related_name="property_assignments")
+    upsell = models.ForeignKey(Upsell, on_delete=models.CASCADE, related_name="property_assignments")
     property_ref = models.ForeignKey('property.Property', on_delete=models.CASCADE, related_name="available_upsells") 
 
     class Meta:

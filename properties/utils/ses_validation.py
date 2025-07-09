@@ -1,3 +1,4 @@
+from datetime import timezone
 import requests,logging, base64, os, io, zipfile, xml.dom.minidom
 import urllib3
 from io import BytesIO
@@ -11,50 +12,70 @@ logger = logging.getLogger(__name__)
 SES_URL = "https://hospedajes.ses.mir.es/hospedajes-web/ws/v1/comunicacion"
 
 
-def generate_ses_xml(est_code, tipo_operacion="A"):
+def generate_ses_xml(property_instance, tipo_operacion="A"):
     """
     Generates SES-compatible XML for property validation.
     """
+    today = timezone.now().date()
+    check_in_date = today + timezone.timedelta(days=1)
+    check_out_date = check_in_date + timezone.timedelta(days=3)
+    
+    contract_date = today.strftime("%Y-%m-%d")
+    check_in = check_in_date.strftime("%Y-%m-%dT14:00:00")
+    check_out = check_out_date.strftime("%Y-%m-%dT11:00:00")
+
+    property_ref = property_instance.property_reference or f"PROP-{property_instance.code}"
+    guests = property_instance.max_guests if property_instance.max_guests else 1
+    country_code = (property_instance.country or "ESP").upper()
+    postal = property_instance.postal_code or "00000"
+    
+    owner = property_instance.owner
+    owner_name = owner.first_name if hasattr(owner, 'first_name') and owner.first_name else "Property"
+    owner_lastname = owner.last_name if hasattr(owner, 'last_name') and owner.last_name else "Owner"
+    owner_email = owner.email if hasattr(owner, 'email') and owner.email else ""
+    owner_phone = owner.phone if hasattr(owner, 'phone') and owner.phone else "000000000"
+
+    municipality_code = property_instance.city or "38001"
     xml_template = f"""<?xml version="1.0" encoding="UTF-8"?>
 <alt:peticion xmlns:alt="http://www.neg.hospedajes.mir.es/altaParteHospedaje">
   <solicitud>
-    <codigoEstablecimiento>{est_code}</codigoEstablecimiento>
+    <codigoEstablecimiento>{property_instance.establishment_code}</codigoEstablecimiento>
     <comunicacion>
       <contrato>
         <referencia>PRUEBA-ESPAÑA-001</referencia>
-        <fechaContrato>2025-04-17</fechaContrato>
+        <fechaContrato>{contract_date}</fechaContrato>
         <fechaEntrada>2025-04-18T14:00:00</fechaEntrada>
         <fechaSalida>2025-04-21T11:00:00</fechaSalida>
-        <numPersonas>1</numPersonas>
+        <numPersonas>{guests}</numPersonas>
         <numHabitaciones>1</numHabitaciones>
         <pago>
           <tipoPago>EFECT</tipoPago>
-          <fechaPago>2025-04-17</fechaPago>
+          <fechaPago>{contract_date}</fechaPago>
           <medioPago>efectivo</medioPago>
-          <titular>PRUEBA</titular>
+          <titular>{property_instance.name}</titular>
         </pago>
       </contrato>
       <persona>
         <rol>VI</rol>
-        <nombre>TuriCheck</nombre>
-        <apellido1>VALIDAR</apellido1>
+        <nombre>{owner_name}</nombre>
+        <apellido1>{owner_lastname}</apellido1>
         <apellido2>CONEXION</apellido2>
         <tipoDocumento>NIF</tipoDocumento>
-        <numeroDocumento>00000000T</numeroDocumento>
+        <numeroDocumento>{property_instance.cif_nif}</numeroDocumento>
         <soporteDocumento>123456789</soporteDocumento>
         <fechaNacimiento>1990-01-01</fechaNacimiento>
-        <nacionalidad>ESP</nacionalidad>
+        <nacionalidad>{country_code}</nacionalidad>
         <sexo>H</sexo>
         <direccion>
-          <direccion>Calle El Sauce 9</direccion>
+          <direccion>{property_instance.address or 'Default Address'}</direccion>
           <direccionComplementaria>Planta 1</direccionComplementaria>
-          <codigoMunicipio>38001</codigoMunicipio>
-          <codigoPostal>38670</codigoPostal>
-          <pais>ESP</pais>
+          <codigoMunicipio>{municipality_code}</codigoMunicipio>
+          <codigoPostal>{postal}</codigoPostal>
+          <pais>{country_code}</pais>
         </direccion>
-        <telefono>634000000</telefono>
+        <telefono>{owner_phone}</telefono>
         <telefono2>922000000</telefono2>
-        <correo>info@turicheck.com</correo>
+        <correo>{owner_email}</correo>
         <parentesco>PM</parentesco>
       </persona>
     </comunicacion>
@@ -90,21 +111,15 @@ def zip_and_encode_xml(xml_content):
     Zips the XML content and encodes it in base64
     """
     try:
-        # Create zip file in memory
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Use writestr method correctly
             zip_file.writestr('parte.xml', xml_content.encode('utf-8'))
-        
-        # Get the bytes content and encode in base64
         zip_buffer.seek(0)
         base64_content = base64.b64encode(zip_buffer.read()).decode('ascii')
-        
         return base64_content
     except Exception as e:
         logger.error(f"Error zipping and encoding XML: {e}")
         raise
-
 
 def send_validation_request(xml_data, ws_user, ws_password, landlord_code):
     """
@@ -112,34 +127,22 @@ def send_validation_request(xml_data, ws_user, ws_password, landlord_code):
     """
     try:
         base64_content = zip_and_encode_xml(xml_data)
-        print('base64_content: ', base64_content)
-        
         soap_request = create_soap_request(landlord_code, base64_content)
-        print('soap_request: ', soap_request)
-        
         auth_token = base64.b64encode(f"{ws_user}:{ws_password}".encode()).decode()
-        
         headers = {
             "Authorization": f"Basic {auth_token}",
             "Content-Type": "text/xml; charset=UTF-8",
             "Accept": "application/xml",
             "User-Agent": "TuriCheck/1.0"
         }
-        
-        # Path to certificates - update these paths as needed for your environment
         cert_path = ("/home/ts/Downloads/cert.pem", "/home/ts/Downloads/key.pem")
-        
-        logger.info(f"Sending SES validation request to {SES_URL}")
-        
         response = requests.post(
             url=SES_URL,
             data=soap_request.encode("utf-8"),
             headers=headers,
             cert=cert_path,
-            verify=False,  # Consider setting this to True in production with proper CA certs
+            verify=False,
         )
-        
-        logger.info(f"SES response status code: {response.status_code}")        
         if response.status_code == 200:
             if ("<codigo>0</codigo>" in response.text or 
                 ("<codigo>10121</codigo>" in response.text and "Lote duplicado" in response.text)):

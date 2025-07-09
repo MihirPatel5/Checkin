@@ -123,7 +123,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ("id", "email", "role", "first_name", "last_name", "language", "created_by")
+        fields = ("id", "email", "role", "first_name", "last_name", "language", "created_by", "stripe_customer_id", "stripe_account_id")
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

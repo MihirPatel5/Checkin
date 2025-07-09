@@ -13,6 +13,30 @@ from utils.translation_services import generate_translations
 from utils.ses_validation import generate_ses_xml, send_validation_request
 import json
 
+
+def process_activities_data(original_data):
+    activities_data = []
+    if "activities_data" in original_data and isinstance(original_data["activities_data"], str):
+        try:
+            activities_data = json.loads(original_data["activities_data"])
+        except json.JSONDecodeError:
+            activities_data = []
+    elif hasattr(original_data, 'getlist') or isinstance(original_data, dict):
+        activities_dict = {}
+        for key in original_data:
+            if key.startswith('activities_data[') and '][' in key:
+                try:
+                    index = int(key[len('activities_data['):].split(']')[0])
+                    field = key.split('][')[1].rstrip(']')
+                    if index not in activities_dict:
+                        activities_dict[index] = {}
+                    activities_dict[index][field] = original_data[key]
+                except (ValueError, IndexError):
+                    continue
+        activities_data = [data for _, data in sorted(activities_dict.items())]
+    return activities_data
+
+
 class PropertyListCreateAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -35,7 +59,6 @@ class PropertyListCreateAPIView(APIView):
             queryset = queryset.filter(
                 Q(name__icontains=search_query) |
                 Q(address__icontains=search_query) |
-                # Q(translations__description__icontains=search_query) |
                 Q(property_type__icontains=search_query) |
                 Q(property_reference__icontains=search_query) |
                 Q(city__icontains=search_query)
@@ -53,17 +76,44 @@ class PropertyListCreateAPIView(APIView):
             original_data = request.data.copy()
             translations_str = original_data.get("translations", "")
             try:
-                translations_dict = json.loads(translations_str)
+                translations_dict = json.loads(translations_str) if isinstance(translations_str, str) else translations_str
             except json.JSONDecodeError:
                 return Response({"error": "Invalid JSON in 'translations' field."}, status=400)
             if not translations_dict:
                 return Response({"error": "Missing translation data."}, status=400)
             source_lang, source_fields = list(translations_dict.items())[0]
             full_translations = generate_translations(source_fields, source_lang)
-            original_data["translations"] = full_translations
-            mutable_data = original_data.dict() if hasattr(original_data, 'dict') else original_data
+            
+            activities_data = []
+            if "activities_data" in original_data and isinstance(original_data["activities_data"], str):
+                try:
+                    activities_data = json.loads(original_data["activities_data"])
+                except json.JSONDecodeError:
+                    activities_data = []
+            elif hasattr(original_data, 'getlist') or isinstance(original_data, dict):
+                activities_dict = {}
+                for key in original_data:
+                    if key.startswith('activities_data[') and '][' in key:
+                        try:
+                            index = int(key[len('activities_data['):].split(']')[0])
+                            field = key.split('][')[1].rstrip(']')
+                            if index not in activities_dict:
+                                activities_dict[index] = {}
+                            activities_dict[index][field] = original_data[key]
+                        except (ValueError, IndexError):
+                            continue
+                activities_data = [data for _, data in sorted(activities_dict.items())]
+
+            mutable_data = {}
+            for key in original_data:
+                if key not in ['translations', 'activities_data']:
+                    if key in ['image', 'upsell_ids'] and hasattr(original_data, 'getlist'):
+                        mutable_data[key] = original_data.getlist(key)
+                    else:
+                        mutable_data[key] = original_data[key]
             mutable_data["translations"] = full_translations
-            serializer = PropertySerializer(data=original_data, context={"request": request})
+            mutable_data["activities_data"] = activities_data
+            serializer = PropertySerializer(data=mutable_data, context={"request": request})
             if serializer.is_valid():
                 property_instance = serializer.save()
                 return Response(
@@ -92,22 +142,39 @@ class PropertyDetailAPIView(APIView):
         return Response(serializer.data)
 
     def put(self, request, property_id):
-        property_instance = self.get_object(property_id)
-        serializer = PropertySerializer(
-            property_instance,
-            data=request.data,
-            partial=True,
-            context={"request": request}
-        )
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            property_instance = self.get_object(property_id)
+            original_data = request.data.copy()
+            
+            activities_data = process_activities_data(original_data)
+            mutable_data = {}
+            for key in original_data:
+                if key not in ['activities_data']:
+                    if key in ['image', 'upsell_ids'] and hasattr(original_data, 'getlist'):
+                        mutable_data[key] = original_data.getlist(key)
+                    else:
+                        mutable_data[key] = original_data[key]
+            mutable_data["activities_data"] = activities_data
+            serializer = PropertySerializer(
+                property_instance,
+                data=mutable_data,
+                partial=True,
+                context={"request": request}
+            )
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     def delete(self, request, property_id):
         property_instance = self.get_object(property_id)
         property_instance.delete()
-        return Response({"message": "Property deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MultipleDeletePropertyAPIView(APIView):

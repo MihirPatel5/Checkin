@@ -1,17 +1,19 @@
+from email import encoders
+from email.mime.base import MIMEBase
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from dataclasses import dataclass, field
-
+from django.conf import settings
 
 @dataclass
 class Email:
     """This is Email sending Service used for sending mail and attach all context of mail like text, file, links etc and add recipient, cc."""
 
-    smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    smtp_user: str = "abd.bodara@gmail.com"
-    smtp_password: str = "rpkpcrezdnthnffg"
+    smtp_server: str = settings.EMAIL_HOST
+    smtp_port: int = settings.EMAIL_PORT
+    smtp_user: str = settings.EMAIL_HOST_USER
+    smtp_password: str = settings.EMAIL_HOST_PASSWORD
 
     _to: list = field(default_factory=list)
     _cc: list = field(default_factory=list)
@@ -42,6 +44,17 @@ class Email:
         self.html = html
         return self
 
+    def attach_file(self, file_data, filename, mimetype='application/pdf'):
+        """Attach a file to the email"""
+        if not hasattr(self, '_attachments'):
+            self._attachments = []
+        self._attachments.append({
+            'data': file_data,
+            'filename': filename,
+            'mimetype': mimetype
+        })
+        return self
+
     def validate(self):
         if not self._to:
             raise ValueError("Recipient email is required")
@@ -56,12 +69,14 @@ class Email:
         try:
             # Set up the email server
             server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            server.ehlo()
             server.starttls()
+            server.ehlo()
             server.login(self.smtp_user, self.smtp_password)
 
             # Create email message
             msg = MIMEMultipart()
-            msg["From"] = self.smtp_user
+            msg["From"] = settings.DEFAULT_FROM_EMAIL
             msg["To"] = ", ".join(self._to)
             msg["Subject"] = self.subject
 
@@ -73,7 +88,16 @@ class Email:
                 msg.attach(MIMEText(self.text, "plain"))
             if self.html:
                 msg.attach(MIMEText(self.html, "html"))
-
+            if hasattr(self, '_attachments'):
+                for attachment in self._attachments:
+                    part = MIMEBase(*attachment['mimetype'].split('/'))
+                    part.set_payload(attachment['data'])
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="{attachment["filename"]}"'
+                    )
+                    msg.attach(part)
             # Send email
             server.sendmail(self.smtp_user, self._to + self._cc, msg.as_string())
             server.quit()

@@ -8,7 +8,13 @@ from .views import (
     StripeConnectViewSet,
     UpsellViewSet,
     CreatePaymentIntentView,
-    CreateConnectAccountView
+    CreateConnectAccountView,
+    CreateStripeConnectAccountView,
+    stripe_webhook,
+    AttachPaymentMethodView,
+    ListPaymentMethodsView,
+    ManagePaymentMethodView,
+    SubscriptionInvoiceViewSet
 )
 
 # Router for ViewSets
@@ -19,10 +25,17 @@ router.register(r'coupons', CouponViewSet, basename='coupon')
 router.register(r'transactions', TransactionViewSet, basename='transaction')
 router.register(r'stripe-connect', StripeConnectViewSet, basename='stripe-connect')
 router.register(r'upsells', UpsellViewSet, basename='upsell')
+router.register(r'invoices', SubscriptionInvoiceViewSet, basename='invoice')  # Add this
 
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('webhook/stripe/', stripe_webhook, name='stripe-webhook'),
     path('create-payment-intent/', CreatePaymentIntentView.as_view(), name='create-payment-intent'),
-    path('create-stripe-account/', CreateConnectAccountView.as_view(), name='create-stripe-account')
+    path("stripe/connect/", CreateStripeConnectAccountView.as_view(), name="stripe-connect"),
+    path('create-stripe-account/', CreateConnectAccountView.as_view(), name='create-stripe-account'),
+    path('attach-payment-method/', AttachPaymentMethodView.as_view(), name='attach-payment-method'),
+    path('list-saved-cards/', ListPaymentMethodsView.as_view()),
+    path('manage-saved-cards/', ManagePaymentMethodView.as_view())
+
 ]
